@@ -4,28 +4,30 @@ import {
   type PiSettings,
   type ServerProviderModel,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
-import type { ChildProcessSpawner } from "effect/unstable/process";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
 import {
   parsePiModelList,
   PI_THINKING_LEVELS,
+  PiRuntime,
   piRuntimeErrorDetail,
-  runPiCommand,
   type PiModelInfo,
 } from "../piRuntime.ts";
 import {
   buildServerProvider,
   parseGenericCliVersion,
   providerModelsFromSettings,
+  type ProviderProbeResult,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
 const PI_PRESENTATION = {
   displayName: "Pi",
+  badgeLabel: "Early Access",
   showInteractionModeToggle: false,
 } as const;
 
@@ -79,7 +81,30 @@ function formatPiProbeError(detail: string): { installed: boolean; message: stri
   };
 }
 
-export const makePendingPiProvider = (piSettings: PiSettings): Effect.Effect<ServerProviderDraft> =>
+const piSnapshot = (input: {
+  readonly piSettings: PiSettings;
+  readonly checkedAt: string;
+  readonly probe: ProviderProbeResult;
+  readonly models?: ReadonlyArray<ServerProviderModel>;
+}): ServerProviderDraft =>
+  buildServerProvider({
+    presentation: PI_PRESENTATION,
+    enabled: input.piSettings.enabled,
+    checkedAt: input.checkedAt,
+    models:
+      input.models ??
+      providerModelsFromSettings(
+        [],
+        PROVIDER,
+        input.piSettings.customModels,
+        DEFAULT_PI_MODEL_CAPABILITIES,
+      ),
+    probe: input.probe,
+  });
+
+export const buildInitialPiProviderSnapshot = (
+  piSettings: PiSettings,
+): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
     const models = providerModelsFromSettings(
@@ -88,9 +113,8 @@ export const makePendingPiProvider = (piSettings: PiSettings): Effect.Effect<Ser
       piSettings.customModels,
       DEFAULT_PI_MODEL_CAPABILITIES,
     );
-    return buildServerProvider({
-      presentation: PI_PRESENTATION,
-      enabled: piSettings.enabled,
+    return piSnapshot({
+      piSettings,
       checkedAt,
       models,
       probe: {
@@ -108,18 +132,18 @@ export const makePendingPiProvider = (piSettings: PiSettings): Effect.Effect<Ser
 export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function* (
   piSettings: PiSettings,
   environment?: NodeJS.ProcessEnv,
-): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
+): Effect.fn.Return<ServerProviderDraft, never, PiRuntime> {
+  const piRuntime = yield* PiRuntime;
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const customModels = piSettings.customModels;
+  const failureDetail = (cause: Cause.Cause<unknown>) => piRuntimeErrorDetail(Cause.squash(cause));
 
   const fallback = (detail: string, version: string | null = null) => {
     const failure = formatPiProbeError(detail);
-    return buildServerProvider({
-      presentation: PI_PRESENTATION,
-      enabled: piSettings.enabled,
+    return piSnapshot({
+      piSettings,
       checkedAt,
-      models: providerModelsFromSettings([], PROVIDER, customModels, DEFAULT_PI_MODEL_CAPABILITIES),
       probe: {
         installed: failure.installed,
         version,
@@ -131,11 +155,9 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   };
 
   if (!piSettings.enabled) {
-    return buildServerProvider({
-      presentation: PI_PRESENTATION,
-      enabled: false,
+    return piSnapshot({
+      piSettings: { ...piSettings, enabled: false },
       checkedAt,
-      models: providerModelsFromSettings([], PROVIDER, customModels, DEFAULT_PI_MODEL_CAPABILITIES),
       probe: {
         installed: false,
         version: null,
@@ -147,29 +169,34 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   }
 
   const versionExit = yield* Effect.exit(
-    runPiCommand({
+    piRuntime.runCommand({
       binaryPath: piSettings.binaryPath,
       args: ["--version"],
       environment: resolvedEnvironment,
     }),
   );
   if (versionExit._tag === "Failure") {
-    return fallback(piRuntimeErrorDetail(versionExit.cause));
+    const detail = failureDetail(versionExit.cause);
+    yield* Effect.logWarning(`Pi provider version probe failed: ${detail}`);
+    return fallback(detail);
   }
   const version = parseGenericCliVersion(versionExit.value.stdout);
   if (!version) {
+    yield* Effect.logWarning("Pi provider version probe returned unparseable output.");
     return fallback("Unable to determine Pi version from `pi --version` output.");
   }
 
   const modelsExit = yield* Effect.exit(
-    runPiCommand({
+    piRuntime.runCommand({
       binaryPath: piSettings.binaryPath,
       args: ["--list-models"],
       environment: resolvedEnvironment,
     }),
   );
   if (modelsExit._tag === "Failure") {
-    return fallback(piRuntimeErrorDetail(modelsExit.cause), version);
+    const detail = failureDetail(modelsExit.cause);
+    yield* Effect.logWarning(`Pi provider model probe failed: ${detail}`);
+    return fallback(detail, version);
   }
 
   const piModels = parsePiModelList(modelsExit.value.stdout);
@@ -180,9 +207,8 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     DEFAULT_PI_MODEL_CAPABILITIES,
   );
 
-  return buildServerProvider({
-    presentation: PI_PRESENTATION,
-    enabled: true,
+  return piSnapshot({
+    piSettings,
     checkedAt,
     models,
     probe: {

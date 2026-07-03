@@ -13,7 +13,7 @@ import { ServerSettingsService } from "../../serverSettings.ts";
 import { makePiTextGeneration } from "../../textGeneration/PiTextGeneration.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makePiAdapter } from "../Layers/PiAdapter.ts";
-import { checkPiProviderStatus, makePendingPiProvider } from "../Layers/PiProvider.ts";
+import { buildInitialPiProviderSnapshot, checkPiProviderStatus } from "../Layers/PiProvider.ts";
 import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import {
@@ -27,6 +27,7 @@ import {
   makePackageManagedProviderMaintenanceResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
+import { PiRuntime } from "../piRuntime.ts";
 import type { ServerProviderDraft } from "../providerSnapshot.ts";
 import {
   haveProviderSnapshotSettingsChanged,
@@ -52,6 +53,7 @@ export type PiDriverEnv =
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | Path.Path
+  | PiRuntime
   | ProviderEventLoggers
   | ServerConfig
   | ServerSettingsService;
@@ -82,7 +84,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
   defaultConfig: (): PiSettings => decodePiSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const piRuntime = yield* PiRuntime;
       const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
       const eventLoggers = yield* ProviderEventLoggers;
@@ -122,7 +124,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
 
       const checkProvider = checkPiProviderStatus(effectiveConfig, processEnv).pipe(
         Effect.map(stampIdentity),
-        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.provideService(PiRuntime, piRuntime),
       );
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
@@ -132,7 +134,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
         initialSnapshot: (settings) =>
-          makePendingPiProvider(settings.provider).pipe(Effect.map(stampIdentity)),
+          buildInitialPiProviderSnapshot(settings.provider).pipe(Effect.map(stampIdentity)),
         checkProvider,
         enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
           enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {

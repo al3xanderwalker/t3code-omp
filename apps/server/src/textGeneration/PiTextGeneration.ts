@@ -1,12 +1,11 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { TextGenerationError, type ModelSelection, type PiSettings } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
-import { parsePiModelSlug, piRuntimeErrorDetail, runPiCommand } from "../provider/piRuntime.ts";
+import { parsePiModelSlug, PiRuntime, piRuntimeErrorDetail } from "../provider/piRuntime.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -30,7 +29,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
   piSettings: PiSettings,
   environment?: NodeJS.ProcessEnv,
 ) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const piRuntime = yield* PiRuntime;
   const resolvedEnvironment = environment ?? process.env;
 
   const runPiJson = Effect.fn("runPiJson")(function* <S extends Schema.Top>(input: {
@@ -48,39 +47,40 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       });
     }
 
-    const result = yield* runPiCommand({
-      binaryPath: piSettings.binaryPath,
-      args: [
-        "--print",
-        "--mode",
-        "text",
-        "--no-session",
-        "--no-tools",
-        "--no-extensions",
-        "--no-skills",
-        "--no-prompt-templates",
-        "--no-context-files",
-        "--thinking",
-        "off",
-        "--provider",
-        parsedModel.provider,
-        "--model",
-        parsedModel.modelId,
-        input.prompt,
-      ],
-      environment: resolvedEnvironment,
-      cwd: input.cwd,
-    }).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-      Effect.mapError(
-        (cause) =>
-          new TextGenerationError({
-            operation: input.operation,
-            detail: piRuntimeErrorDetail(cause),
-            cause,
-          }),
-      ),
-    );
+    const result = yield* piRuntime
+      .runCommand({
+        binaryPath: piSettings.binaryPath,
+        args: [
+          "--print",
+          "--mode",
+          "text",
+          "--no-session",
+          "--no-tools",
+          "--no-extensions",
+          "--no-skills",
+          "--no-prompt-templates",
+          "--no-context-files",
+          "--thinking",
+          "off",
+          "--provider",
+          parsedModel.provider,
+          "--model",
+          parsedModel.modelId,
+          input.prompt,
+        ],
+        environment: resolvedEnvironment,
+        cwd: input.cwd,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new TextGenerationError({
+              operation: input.operation,
+              detail: piRuntimeErrorDetail(cause),
+              cause,
+            }),
+        ),
+      );
 
     if (result.code !== 0) {
       return yield* new TextGenerationError({

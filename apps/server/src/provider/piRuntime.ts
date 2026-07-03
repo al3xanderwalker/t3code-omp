@@ -1,8 +1,10 @@
 import type { ProviderApprovalDecision, RuntimeMode } from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Layer from "effect/Layer";
 import * as P from "effect/Predicate";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
@@ -88,6 +90,7 @@ export const runPiCommand = (input: {
             cause,
           }),
     ),
+    Effect.withSpan("pi.runCommand"),
   );
 
 export interface ParsedPiModelSlug {
@@ -237,7 +240,148 @@ export interface PiRpcResponse {
   readonly data?: unknown;
 }
 
-export type PiRpcEvent = Record<string, unknown> & { readonly type: string };
+const PiRpcResponseWithId = Schema.Struct({
+  type: Schema.Literal("response"),
+  id: Schema.String,
+  command: Schema.String,
+  success: Schema.Boolean,
+  error: Schema.optionalKey(Schema.String),
+  data: Schema.optionalKey(Schema.Unknown),
+});
+
+const PiContentBlock = Schema.Struct({
+  type: Schema.String,
+  text: Schema.optionalKey(Schema.String),
+});
+export type PiContentBlock = typeof PiContentBlock.Type;
+
+export const PiMessageContent = Schema.Union([Schema.String, Schema.Array(PiContentBlock)]);
+export type PiMessageContent = typeof PiMessageContent.Type;
+
+const PiAssistantMessageEvent = Schema.Struct({
+  type: Schema.String,
+  delta: Schema.optionalKey(Schema.String),
+  contentIndex: Schema.optionalKey(Schema.Number),
+});
+
+export const PiToolResult = Schema.Struct({
+  content: Schema.optionalKey(PiMessageContent),
+});
+export type PiToolResult = typeof PiToolResult.Type;
+
+const PiTokenCounts = Schema.Struct({
+  total: Schema.optionalKey(Schema.Number),
+  input: Schema.optionalKey(Schema.Number),
+  cacheRead: Schema.optionalKey(Schema.Number),
+  output: Schema.optionalKey(Schema.Number),
+});
+
+const PiContextUsage = Schema.Struct({
+  tokens: Schema.optionalKey(Schema.Number),
+  contextWindow: Schema.optionalKey(Schema.Number),
+});
+
+export const PiSessionStats = Schema.Struct({
+  tokens: Schema.optionalKey(PiTokenCounts),
+  contextUsage: Schema.optionalKey(PiContextUsage),
+  toolCalls: Schema.optionalKey(Schema.Number),
+});
+export type PiSessionStats = typeof PiSessionStats.Type;
+
+export const PiThreadMessage = Schema.Struct({
+  role: Schema.String,
+  stopReason: Schema.optionalKey(Schema.String),
+  content: Schema.optionalKey(PiMessageContent),
+});
+export type PiThreadMessage = typeof PiThreadMessage.Type;
+
+export const PiStateResponseData = Schema.Struct({
+  sessionId: Schema.optionalKey(Schema.String),
+});
+export type PiStateResponseData = typeof PiStateResponseData.Type;
+
+export const PiMessagesResponseData = Schema.Struct({
+  messages: Schema.Array(PiThreadMessage),
+});
+export type PiMessagesResponseData = typeof PiMessagesResponseData.Type;
+
+const MessageStartEvent = Schema.Struct({
+  type: Schema.Literal("message_start"),
+});
+
+const MessageUpdateEvent = Schema.Struct({
+  type: Schema.Literal("message_update"),
+  assistantMessageEvent: PiAssistantMessageEvent,
+});
+
+const MessageEndEvent = Schema.Struct({
+  type: Schema.Literal("message_end"),
+  message: PiThreadMessage,
+});
+
+const ToolExecutionEvent = Schema.Struct({
+  type: Schema.Literals(["tool_execution_start", "tool_execution_update", "tool_execution_end"]),
+  toolCallId: Schema.optionalKey(Schema.String),
+  toolName: Schema.optionalKey(Schema.String),
+  args: Schema.optionalKey(Schema.Unknown),
+  partialResult: Schema.optionalKey(PiToolResult),
+  result: Schema.optionalKey(PiToolResult),
+  isError: Schema.optionalKey(Schema.Boolean),
+});
+
+const AgentEndEvent = Schema.Struct({
+  type: Schema.Literal("agent_end"),
+});
+
+const ExtensionUiRequestEvent = Schema.Struct({
+  type: Schema.Literal("extension_ui_request"),
+  id: Schema.optionalKey(Schema.String),
+  method: Schema.optionalKey(Schema.String),
+  notifyType: Schema.optionalKey(Schema.String),
+  message: Schema.optionalKey(Schema.String),
+  title: Schema.optionalKey(Schema.String),
+  options: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
+const CompactionStartEvent = Schema.Struct({
+  type: Schema.Literal("compaction_start"),
+});
+
+const CompactionEndEvent = Schema.Struct({
+  type: Schema.Literal("compaction_end"),
+  aborted: Schema.optionalKey(Schema.Boolean),
+});
+
+const AutoRetryStartEvent = Schema.Struct({
+  type: Schema.Literal("auto_retry_start"),
+  attempt: Schema.optionalKey(Schema.Unknown),
+});
+
+const ExtensionErrorEvent = Schema.Struct({
+  type: Schema.Literal("extension_error"),
+  error: Schema.optionalKey(Schema.String),
+});
+
+export const PiRpcEvent = Schema.Union([
+  MessageStartEvent,
+  MessageUpdateEvent,
+  MessageEndEvent,
+  ToolExecutionEvent,
+  AgentEndEvent,
+  ExtensionUiRequestEvent,
+  CompactionStartEvent,
+  CompactionEndEvent,
+  AutoRetryStartEvent,
+  ExtensionErrorEvent,
+]);
+export type PiRpcEvent = typeof PiRpcEvent.Type;
+
+export const decodePiSessionStatsExit = Schema.decodeUnknownExit(PiSessionStats);
+export const decodePiStateResponseDataExit = Schema.decodeUnknownExit(PiStateResponseData);
+export const decodePiMessagesResponseDataExit = Schema.decodeUnknownExit(PiMessagesResponseData);
+
+const decodePiRpcResponseWithIdExit = Schema.decodeUnknownExit(PiRpcResponseWithId);
+const decodePiRpcEventExit = Schema.decodeUnknownExit(PiRpcEvent);
 
 export interface PiRpcHandle {
   readonly request: (
@@ -247,14 +391,6 @@ export interface PiRpcHandle {
   readonly notify: (payload: Record<string, unknown>) => Effect.Effect<void>;
   readonly events: Queue.Dequeue<PiRpcEvent>;
   readonly exitCode: Effect.Effect<number>;
-}
-
-function asPiRpcResponse(
-  value: Record<string, unknown>,
-): (PiRpcResponse & { readonly id: string }) | null {
-  return value.type === "response" && typeof value.id === "string"
-    ? (value as unknown as PiRpcResponse & { readonly id: string })
-    : null;
 }
 
 export interface SpawnPiRpcInput {
@@ -368,18 +504,24 @@ export const spawnPiRpcSession = (
         const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
         if (trimmed.length === 0) return;
         const decoded = decodeJsonStringExit(trimmed);
-        if (Exit.isFailure(decoded)) return;
-        const parsed = decoded.value;
-        if (
-          !parsed ||
-          typeof parsed !== "object" ||
-          typeof (parsed as { type?: unknown }).type !== "string"
-        ) {
+        if (Exit.isFailure(decoded)) {
+          yield* Effect.logWarning("Dropped malformed Pi RPC JSON line.");
           return;
         }
-        const record = parsed as Record<string, unknown> & { type: string };
-        const response = asPiRpcResponse(record);
-        if (response) {
+        const parsed = decoded.value;
+        const parsedType =
+          parsed && typeof parsed === "object" && "type" in parsed ? parsed.type : undefined;
+        if (typeof parsedType !== "string") {
+          yield* Effect.logWarning("Dropped malformed Pi RPC line without a string type.");
+          return;
+        }
+        if (parsedType === "response") {
+          const responseExit = decodePiRpcResponseWithIdExit(parsed);
+          if (Exit.isFailure(responseExit)) {
+            yield* Effect.logWarning("Dropped malformed Pi RPC response.");
+            return;
+          }
+          const response = responseExit.value;
           const deferred = pending.get(response.id);
           if (deferred) {
             pending.delete(response.id);
@@ -387,7 +529,12 @@ export const spawnPiRpcSession = (
           }
           return;
         }
-        yield* Queue.offer(events, record).pipe(Effect.ignore);
+        const eventExit = decodePiRpcEventExit(parsed);
+        if (Exit.isFailure(eventExit)) {
+          yield* Effect.logWarning(`Dropped unsupported Pi RPC event '${parsedType}'.`);
+          return;
+        }
+        yield* Queue.offer(events, eventExit.value).pipe(Effect.ignore);
       });
 
     yield* child.stdout.pipe(
@@ -404,8 +551,9 @@ export const spawnPiRpcSession = (
       Effect.orElseSucceed(() => -1),
     );
 
-    const request: PiRpcHandle["request"] = (command, options) =>
-      Effect.gen(function* () {
+    const request: PiRpcHandle["request"] = (command, options) => {
+      const commandType = String(command.type ?? "request");
+      return Effect.gen(function* () {
         requestSequence += 1;
         const id = `t3-${requestSequence}`;
         const deferred = yield* Deferred.make<PiRpcResponse, PiRuntimeError>();
@@ -417,8 +565,8 @@ export const spawnPiRpcSession = (
             orElse: () =>
               Effect.fail(
                 new PiRuntimeError({
-                  operation: String(command.type ?? "request"),
-                  detail: `Timed out waiting for Pi response to '${String(command.type)}'.`,
+                  operation: commandType,
+                  detail: `Timed out waiting for Pi response to '${commandType}'.`,
                 }),
               ),
           }),
@@ -426,15 +574,51 @@ export const spawnPiRpcSession = (
         );
         if (!response.success) {
           return yield* new PiRuntimeError({
-            operation: String(command.type ?? "request"),
+            operation: commandType,
             detail: response.error ?? `Pi command '${response.command}' failed.`,
           });
         }
         return response;
-      });
+      }).pipe(Effect.withSpan(`pi.${commandType}`));
+    };
 
     const notify: PiRpcHandle["notify"] = (payload) =>
       Queue.offer(stdinQueue, `${encodeJsonLine(payload)}\n`).pipe(Effect.asVoid);
 
     return { request, notify, events, exitCode } satisfies PiRpcHandle;
   });
+
+export interface PiRuntimeShape {
+  readonly runCommand: (input: {
+    readonly binaryPath: string;
+    readonly args: ReadonlyArray<string>;
+    readonly environment?: NodeJS.ProcessEnv;
+    readonly cwd?: string;
+  }) => Effect.Effect<PiCommandResult, PiRuntimeError>;
+  readonly spawnSession: (
+    input: SpawnPiRpcInput,
+  ) => Effect.Effect<PiRpcHandle, PiRuntimeError, Scope.Scope>;
+}
+
+export const makePiRuntime = Effect.gen(function* () {
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const runCommand: PiRuntimeShape["runCommand"] = (input) =>
+    runPiCommand(input).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+  const spawnSession: PiRuntimeShape["spawnSession"] = (input) =>
+    spawnPiRpcSession(input).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+
+  return {
+    runCommand,
+    spawnSession,
+  } satisfies PiRuntimeShape;
+});
+
+export class PiRuntime extends Context.Service<PiRuntime, PiRuntimeShape>()(
+  "t3/provider/piRuntime",
+) {}
+
+export const PiRuntimeLive = Layer.effect(PiRuntime, makePiRuntime);

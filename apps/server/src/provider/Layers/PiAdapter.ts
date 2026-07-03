@@ -25,7 +25,6 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import { ChildProcessSpawner } from "effect/unstable/process";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
@@ -38,15 +37,21 @@ import {
 } from "../Errors.ts";
 import type { PiAdapterShape } from "../Services/PiAdapter.ts";
 import {
+  decodePiMessagesResponseDataExit,
+  decodePiSessionStatsExit,
+  decodePiStateResponseDataExit,
   parsePiApprovalTitle,
   parsePiModelSlug,
   PI_APPROVAL_EXTENSION_SOURCE,
+  PiRuntime,
   type PiApprovalRequestPayload,
+  type PiMessageContent,
   type PiRpcEvent,
   type PiRpcHandle,
+  type PiSessionStats,
+  type PiToolResult,
   PiRuntimeError,
   piRuntimeErrorDetail,
-  spawnPiRpcSession,
   toPiApprovalSelection,
 } from "../piRuntime.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
@@ -65,6 +70,8 @@ interface PiPendingDialog {
   readonly title: string;
   readonly options: ReadonlyArray<string>;
 }
+
+type PiExtensionUiRequestEvent = Extract<PiRpcEvent, { readonly type: "extension_ui_request" }>;
 
 interface PiSessionContext {
   session: ProviderSession;
@@ -124,48 +131,28 @@ function approvalRequestType(
   return "unknown";
 }
 
-function stringField(record: Record<string, unknown>, key: string): string | undefined {
-  const value = record[key];
-  return typeof value === "string" ? value : undefined;
-}
-
 function toolDetailFromArgs(toolName: string, args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
-  const record = args as Record<string, unknown>;
-  if (toolName === "bash") return stringField(record, "command");
-  return stringField(record, "path") ?? stringField(record, "file_path");
+  if (toolName === "bash" && "command" in args && typeof args.command === "string") {
+    return args.command;
+  }
+  if ("path" in args && typeof args.path === "string") return args.path;
+  if ("file_path" in args && typeof args.file_path === "string") return args.file_path;
+  return undefined;
 }
 
-function textFromContentBlocks(content: unknown): string {
+function textFromContentBlocks(content: PiMessageContent | undefined): string {
   if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => {
-      if (!block || typeof block !== "object") return "";
-      const record = block as Record<string, unknown>;
-      return record.type === "text" && typeof record.text === "string" ? record.text : "";
-    })
-    .join("");
+  return content?.map((block) => (block.type === "text" ? (block.text ?? "") : "")).join("") ?? "";
 }
 
-function toolResultText(result: unknown): string | undefined {
-  if (!result || typeof result !== "object") return undefined;
-  const content = (result as Record<string, unknown>).content;
-  const text = textFromContentBlocks(content);
+function toolResultText(result: PiToolResult | undefined): string | undefined {
+  const text = textFromContentBlocks(result?.content);
   return text.length > 0 ? text : undefined;
 }
 
-function tokenUsageFromStats(stats: unknown): ThreadTokenUsageSnapshot | undefined {
-  if (!stats || typeof stats !== "object") return undefined;
-  const record = stats as Record<string, unknown>;
-  const tokens =
-    record.tokens && typeof record.tokens === "object"
-      ? (record.tokens as Record<string, unknown>)
-      : undefined;
-  const contextUsage =
-    record.contextUsage && typeof record.contextUsage === "object"
-      ? (record.contextUsage as Record<string, unknown>)
-      : undefined;
+function tokenUsageFromStats(stats: PiSessionStats): ThreadTokenUsageSnapshot | undefined {
+  const { tokens, contextUsage } = stats;
   const asCount = (value: unknown): number | undefined =>
     typeof value === "number" && Number.isFinite(value) && value >= 0
       ? Math.round(value)
@@ -181,7 +168,7 @@ function tokenUsageFromStats(stats: unknown): ThreadTokenUsageSnapshot | undefin
       ? { cachedInputTokens: asCount(tokens?.cacheRead) }
       : {}),
     ...(asCount(tokens?.output) !== undefined ? { outputTokens: asCount(tokens?.output) } : {}),
-    ...(asCount(record.toolCalls) !== undefined ? { toolUses: asCount(record.toolCalls) } : {}),
+    ...(asCount(stats.toolCalls) !== undefined ? { toolUses: asCount(stats.toolCalls) } : {}),
   };
 }
 
@@ -226,17 +213,20 @@ function updateProviderSession(
 ): Effect.Effect<ProviderSession> {
   return Effect.gen(function* () {
     const updatedAt = yield* nowIso;
-    const nextSession = {
+    let nextSession: ProviderSession = {
       ...context.session,
       ...patch,
       updatedAt,
-    } as ProviderSession & Record<string, unknown>;
-    const mutableSession = nextSession as Record<string, unknown>;
+    };
     if (options?.clearActiveTurnId) {
-      delete mutableSession.activeTurnId;
+      const { activeTurnId, ...rest } = nextSession;
+      void activeTurnId;
+      nextSession = rest;
     }
     if (options?.clearLastError) {
-      delete mutableSession.lastError;
+      const { lastError, ...rest } = nextSession;
+      void lastError;
+      nextSession = rest;
     }
     context.session = nextSession;
     return nextSession;
@@ -257,7 +247,7 @@ const stopPiContext = Effect.fn("stopPiContext")(function* (context: PiSessionCo
   }
   yield* context.rpc
     .request({ type: "abort" }, { timeoutMs: 2_000 })
-    .pipe(Effect.ignore({ log: false }));
+    .pipe(Effect.ignore({ log: true }));
   yield* Scope.close(context.sessionScope, Exit.void);
   return true;
 });
@@ -266,7 +256,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
   return Effect.gen(function* () {
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("pi");
     const serverConfig = yield* ServerConfig;
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const piRuntime = yield* PiRuntime;
     const crypto = yield* Crypto.Crypto;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -396,7 +386,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       if (statsExit._tag === "Failure") {
         return;
       }
-      const usage = tokenUsageFromStats(statsExit.value.data);
+      const statsDataExit = decodePiSessionStatsExit(statsExit.value.data);
+      if (Exit.isFailure(statsDataExit)) {
+        yield* Effect.logWarning("Dropped malformed Pi session stats response.");
+        return;
+      }
+      const usage = tokenUsageFromStats(statsDataExit.value);
       if (!usage) {
         return;
       }
@@ -409,22 +404,22 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
     const handleExtensionUiRequest = Effect.fn("handleExtensionUiRequest")(function* (
       context: PiSessionContext,
-      event: PiRpcEvent,
+      event: PiExtensionUiRequestEvent,
     ) {
       const threadId = context.session.threadId;
       const turnId = context.activeTurnId;
-      const uiRequestId = stringField(event, "id");
-      const method = stringField(event, "method") ?? "unknown";
+      const uiRequestId = event.id;
+      const method = event.method ?? "unknown";
       if (!uiRequestId) {
         return;
       }
 
       if (method === "notify") {
-        if (stringField(event, "notifyType") === "error") {
+        if (event.notifyType === "error") {
           yield* emit({
             ...(yield* buildEventBase({ threadId, turnId, raw: event })),
             type: "runtime.warning",
-            payload: { message: stringField(event, "message") ?? "Pi extension error." },
+            payload: { message: event.message ?? "Pi extension error." },
           });
         }
         return;
@@ -438,7 +433,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         return;
       }
 
-      const title = stringField(event, "title") ?? "";
+      const title = event.title ?? "";
       const approval = method === "select" ? parsePiApprovalTitle(title) : null;
       if (approval) {
         context.pendingApprovals.set(uiRequestId, approval);
@@ -476,7 +471,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         method,
         title:
           title.length > 0
-            ? `${title}${stringField(event, "message") ? `\n${stringField(event, "message")}` : ""}`
+            ? `${title}${event.message ? `\n${event.message}` : ""}`
             : "Pi extension request",
         options: rawOptions,
       };
@@ -503,14 +498,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         case "message_update": {
-          const delta =
-            event.assistantMessageEvent && typeof event.assistantMessageEvent === "object"
-              ? (event.assistantMessageEvent as Record<string, unknown>)
-              : undefined;
-          if (!delta) break;
-          const deltaType = stringField(delta, "type");
+          const delta = event.assistantMessageEvent;
+          const deltaType = delta.type;
           if (deltaType !== "text_delta" && deltaType !== "thinking_delta") break;
-          const text = stringField(delta, "delta");
+          const text = delta.delta;
           if (!text) break;
           yield* emit({
             ...(yield* buildEventBase({
@@ -531,12 +522,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         case "message_end": {
-          const message =
-            event.message && typeof event.message === "object"
-              ? (event.message as Record<string, unknown>)
-              : undefined;
-          if (!message || message.role !== "assistant") break;
-          context.lastStopReason = stringField(message, "stopReason");
+          const message = event.message;
+          if (message.role !== "assistant") break;
+          context.lastStopReason = message.stopReason;
           const text = textFromContentBlocks(message.content);
           if (text.length > 0) {
             yield* emit({
@@ -561,9 +549,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         case "tool_execution_start":
         case "tool_execution_update":
         case "tool_execution_end": {
-          const toolCallId =
-            stringField(event, "toolCallId") ?? `pi-tool-${context.messageSequence}`;
-          const toolName = stringField(event, "toolName") ?? "tool";
+          const toolCallId = event.toolCallId ?? `pi-tool-${context.messageSequence}`;
+          const toolName = event.toolName ?? "tool";
           const isEnd = event.type === "tool_execution_end";
           const isError = isEnd && event.isError === true;
           const detail = isEnd
@@ -675,7 +662,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             ...(yield* buildEventBase({ threadId, turnId, raw: event })),
             type: "runtime.warning",
             payload: {
-              message: `Pi extension error: ${stringField(event, "error") ?? "unknown"}`,
+              message: `Pi extension error: ${event.error ?? "unknown"}`,
               detail: event,
             },
           });
@@ -733,7 +720,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           const sessionScope = yield* Scope.make();
           const startedExit = yield* Effect.exit(
             Effect.gen(function* () {
-              const rpc = yield* spawnPiRpcSession({
+              const rpc = yield* piRuntime.spawnSession({
                 binaryPath: piSettings.binaryPath,
                 cwd: directory,
                 ...(options?.environment ? { environment: options.environment } : {}),
@@ -742,18 +729,19 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 ...(input.modelSelection ? { modelSlug: input.modelSelection.model } : {}),
                 ...(thinkingLevel ? { thinkingLevel } : {}),
                 approvalExtensionPath,
-              }).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner));
-              // First round trip doubles as the readiness gate: Pi answers
-              // once extensions and session storage are loaded.
+              });
               const state = yield* rpc.request({ type: "get_state" }, { timeoutMs: 20_000 });
-              const stateData =
-                state.data && typeof state.data === "object"
-                  ? (state.data as Record<string, unknown>)
-                  : {};
+              const stateDataExit = decodePiStateResponseDataExit(state.data);
+              if (Exit.isFailure(stateDataExit)) {
+                return yield* new PiRuntimeError({
+                  operation: "get_state",
+                  detail: "Pi returned malformed state data.",
+                });
+              }
               return {
                 sessionScope,
                 rpc,
-                piSessionId: stringField(stateData, "sessionId"),
+                piSessionId: stateDataExit.value.sessionId,
               };
             }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
           );
@@ -1052,19 +1040,21 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       const response = yield* context.rpc
         .request({ type: "get_messages" })
         .pipe(Effect.mapError(toRequestError));
-      const data =
-        response.data && typeof response.data === "object"
-          ? (response.data as Record<string, unknown>)
-          : {};
-      const messages = Array.isArray(data.messages) ? data.messages : [];
+      const dataExit = decodePiMessagesResponseDataExit(response.data);
+      if (Exit.isFailure(dataExit)) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "get_messages",
+          detail: "Pi returned malformed message history.",
+        });
+      }
+      const messages = dataExit.value.messages;
 
       const turns: Array<PiTurnSnapshot> = [];
       for (const message of messages) {
-        if (!message || typeof message !== "object") continue;
-        const role = (message as Record<string, unknown>).role;
-        if (role === "assistant") {
-          turns.push({ id: TurnId.make(`pi-turn-${turns.length}`), items: [message] });
-        } else if (role === "toolResult" && turns.length > 0) {
+        if (message.role === "assistant") {
+          turns.push({ id: TurnId.make(`pi-snapshot-turn-${turns.length}`), items: [message] });
+        } else if (message.role === "toolResult" && turns.length > 0) {
           turns[turns.length - 1]?.items.push(message);
         }
       }
