@@ -104,6 +104,17 @@ it.effect("buildInitialPiProviderSnapshot returns a pending snapshot by default"
   }),
 );
 
+it.effect("buildInitialPiProviderSnapshot includes configured custom models", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* buildInitialPiProviderSnapshot(
+      decodePiSettings({ customModels: ["custom/pi-model"] }),
+    );
+
+    NodeAssert.equal(snapshot.status, "warning");
+    NodeAssert.ok(snapshot.models.some((model) => model.slug === "custom/pi-model"));
+  }),
+);
+
 it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
   it.effect("skips runtime probes when Pi is disabled", () =>
     Effect.gen(function* () {
@@ -128,6 +139,49 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.installed, false);
       NodeAssert.equal(snapshot.status, "error");
       NodeAssert.equal(snapshot.message, "Pi CLI (`pi`) is not installed or not on PATH.");
+    }),
+  );
+
+  it.effect("reports model discovery failures after a successful version probe", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.modelsError = new PiRuntimeError({
+        operation: "runCommand",
+        detail: "model list failed",
+      });
+
+      const snapshot = yield* checkPiProviderStatus(decodePiSettings({ binaryPath: "pi" }));
+
+      NodeAssert.equal(snapshot.enabled, true);
+      NodeAssert.equal(snapshot.installed, true);
+      NodeAssert.equal(snapshot.status, "error");
+      NodeAssert.equal(snapshot.version, "0.4.1");
+      NodeAssert.equal(
+        snapshot.message,
+        "Failed to execute Pi CLI health check: model list failed",
+      );
+      NodeAssert.deepEqual(
+        runtimeMock.state.calls.map((call) => call.args),
+        [["--version"], ["--list-models"]],
+      );
+    }),
+  );
+
+  it.effect("does not list models when Pi version output cannot be parsed", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionResult = { stdout: "pi dev build\n", stderr: "", code: 0 };
+
+      const snapshot = yield* checkPiProviderStatus(decodePiSettings({ binaryPath: "pi" }));
+
+      NodeAssert.equal(snapshot.status, "error");
+      NodeAssert.equal(snapshot.version, null);
+      NodeAssert.equal(
+        snapshot.message,
+        "Failed to execute Pi CLI health check: Unable to determine Pi version from `pi --version` output.",
+      );
+      NodeAssert.deepEqual(
+        runtimeMock.state.calls.map((call) => call.args),
+        [["--version"]],
+      );
     }),
   );
 
@@ -163,6 +217,28 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.installed, true);
       NodeAssert.equal(snapshot.status, "warning");
       NodeAssert.match(snapshot.message ?? "", /reported no models/);
+    }),
+  );
+
+  it.effect("keeps custom Pi models in error and success snapshots", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionError = new PiRuntimeError({
+        operation: "runCommand",
+        detail: "spawn pi ENOENT",
+      });
+      const errorSnapshot = yield* checkPiProviderStatus(
+        decodePiSettings({ binaryPath: "pi", customModels: ["custom/pi-model"] }),
+      );
+      runtimeMock.state.versionError = null;
+      runtimeMock.state.calls.length = 0;
+
+      const successSnapshot = yield* checkPiProviderStatus(
+        decodePiSettings({ binaryPath: "pi", customModels: ["custom/pi-model"] }),
+      );
+
+      NodeAssert.ok(errorSnapshot.models.some((model) => model.slug === "custom/pi-model"));
+      NodeAssert.ok(successSnapshot.models.some((model) => model.slug === "custom/pi-model"));
+      NodeAssert.ok(successSnapshot.models.some((model) => model.slug === DEFAULT_PI_MODEL));
     }),
   );
 });

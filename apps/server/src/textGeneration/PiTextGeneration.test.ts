@@ -88,7 +88,7 @@ beforeEach(() => {
 });
 
 it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
-  it.effect("generates commit, PR, branch, and thread title text through Pi CLI JSON mode", () =>
+  it.effect("generates commit messages through Pi CLI JSON mode", () =>
     withPiTextGeneration((textGeneration) =>
       Effect.gen(function* () {
         queueJson({
@@ -96,9 +96,6 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           body: "Exercise every Pi text generation method.",
           branch: "pi-text-generation-coverage",
         });
-        queueJson({ title: "Add Pi provider tests", body: "Covers provider and adapter flows." });
-        queueJson({ branch: "pi-provider-tests" });
-        queueJson({ title: "Debug Pi provider setup" });
 
         const commit = yield* textGeneration.generateCommitMessage({
           cwd: process.cwd(),
@@ -108,41 +105,16 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           includeBranch: true,
           modelSelection: DEFAULT_MODEL_SELECTION,
         });
-        const pr = yield* textGeneration.generatePrContent({
-          cwd: process.cwd(),
-          baseBranch: "main",
-          headBranch: "feature/pi-text-generation",
-          commitSummary: "Add Pi tests",
-          diffSummary: "Server test additions",
-          diffPatch: "diff --git a/PiProvider.test.ts b/PiProvider.test.ts",
-          modelSelection: DEFAULT_MODEL_SELECTION,
-        });
-        const branch = yield* textGeneration.generateBranchName({
-          cwd: process.cwd(),
-          message: "Add coverage for Pi provider",
-          modelSelection: DEFAULT_MODEL_SELECTION,
-        });
-        const title = yield* textGeneration.generateThreadTitle({
-          cwd: process.cwd(),
-          message: "Why is Pi provider setup failing?",
-          modelSelection: DEFAULT_MODEL_SELECTION,
-        });
 
         NodeAssert.deepEqual(commit, {
           subject: "Add Pi text generation coverage",
           body: "Exercise every Pi text generation method.",
           branch: "feature/pi-text-generation-coverage",
         });
-        NodeAssert.deepEqual(pr, {
-          title: "Add Pi provider tests",
-          body: "Covers provider and adapter flows.",
-        });
-        NodeAssert.deepEqual(branch, { branch: "pi-provider-tests" });
-        NodeAssert.deepEqual(title, { title: "Debug Pi provider setup" });
-        NodeAssert.equal(runtimeMock.state.calls.length, 4);
+        NodeAssert.equal(runtimeMock.state.calls.length, 1);
 
-        const firstArgs = runtimeMock.state.calls[0]?.args ?? [];
-        NodeAssert.deepEqual(firstArgs.slice(0, 14), [
+        const args = runtimeMock.state.calls[0]?.args ?? [];
+        NodeAssert.deepEqual(args.slice(0, 14), [
           "--print",
           "--mode",
           "text",
@@ -158,8 +130,93 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           "anthropic",
           "--model",
         ]);
-        NodeAssert.equal(firstArgs[14], "claude-haiku-4-5");
-        NodeAssert.match(String(firstArgs.at(-1)), /Staged files:/);
+        NodeAssert.equal(args[14], "claude-haiku-4-5");
+        NodeAssert.match(String(args.at(-1)), /Staged files:/);
+      }),
+    ),
+  );
+
+  it.effect("generates PR content through Pi CLI JSON mode", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        queueJson({ title: "Add Pi provider tests", body: "Covers provider and adapter flows." });
+
+        const pr = yield* textGeneration.generatePrContent({
+          cwd: process.cwd(),
+          baseBranch: "main",
+          headBranch: "feature/pi-text-generation",
+          commitSummary: "Add Pi tests",
+          diffSummary: "Server test additions",
+          diffPatch: "diff --git a/PiProvider.test.ts b/PiProvider.test.ts",
+          modelSelection: DEFAULT_MODEL_SELECTION,
+        });
+
+        NodeAssert.deepEqual(pr, {
+          title: "Add Pi provider tests",
+          body: "Covers provider and adapter flows.",
+        });
+        NodeAssert.equal(runtimeMock.state.calls.length, 1);
+        NodeAssert.match(
+          String(runtimeMock.state.calls[0]?.args.at(-1)),
+          /GitHub pull request content/,
+        );
+      }),
+    ),
+  );
+
+  it.effect("generates branch names through Pi CLI JSON mode", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        queueJson({ branch: "pi-provider-tests" });
+
+        const branch = yield* textGeneration.generateBranchName({
+          cwd: process.cwd(),
+          message: "Add coverage for Pi provider",
+          modelSelection: DEFAULT_MODEL_SELECTION,
+        });
+
+        NodeAssert.deepEqual(branch, { branch: "pi-provider-tests" });
+        NodeAssert.equal(runtimeMock.state.calls.length, 1);
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.args.at(-1)), /branch names/);
+      }),
+    ),
+  );
+
+  it.effect("generates thread titles through Pi CLI JSON mode", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        queueJson({ title: "Debug Pi provider setup" });
+
+        const title = yield* textGeneration.generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Why is Pi provider setup failing?",
+          modelSelection: DEFAULT_MODEL_SELECTION,
+        });
+
+        NodeAssert.deepEqual(title, { title: "Debug Pi provider setup" });
+        NodeAssert.equal(runtimeMock.state.calls.length, 1);
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.args.at(-1)), /thread titles/);
+      }),
+    ),
+  );
+
+  it.effect("passes nested provider model slugs to Pi without truncating model ids", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        queueJson({ title: "Review nested model slug" });
+
+        yield* textGeneration.generateThreadTitle({
+          cwd: process.cwd(),
+          message: "Title this",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("pi"),
+            model: "openrouter/qwen/qwen3-coder",
+          },
+        });
+
+        const args = runtimeMock.state.calls[0]?.args ?? [];
+        NodeAssert.equal(args[12], "openrouter");
+        NodeAssert.equal(args[14], "qwen/qwen3-coder");
       }),
     ),
   );
@@ -180,6 +237,52 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
 
         NodeAssert.ok(isTextGenerationError(error));
         NodeAssert.equal(error.detail, "Pi model selection must use the 'provider/model' format.");
+      }),
+    ),
+  );
+
+  it.effect("surfaces invalid Pi JSON output as text generation errors", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.results.push({
+          stdout: "not json",
+          stderr: "",
+          code: 0,
+        });
+
+        const error = yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Title this",
+            modelSelection: DEFAULT_MODEL_SELECTION,
+          })
+          .pipe(Effect.flip);
+
+        NodeAssert.ok(isTextGenerationError(error));
+        NodeAssert.equal(error.detail, "Pi returned invalid structured output.");
+      }),
+    ),
+  );
+
+  it.effect("surfaces empty Pi stdout as text generation errors", () =>
+    withPiTextGeneration((textGeneration) =>
+      Effect.gen(function* () {
+        runtimeMock.state.results.push({
+          stdout: " \n",
+          stderr: "",
+          code: 0,
+        });
+
+        const error = yield* textGeneration
+          .generateThreadTitle({
+            cwd: process.cwd(),
+            message: "Title this",
+            modelSelection: DEFAULT_MODEL_SELECTION,
+          })
+          .pipe(Effect.flip);
+
+        NodeAssert.ok(isTextGenerationError(error));
+        NodeAssert.equal(error.detail, "Pi returned empty output.");
       }),
     ),
   );
