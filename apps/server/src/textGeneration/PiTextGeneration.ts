@@ -66,8 +66,8 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
           parsedModel.provider,
           "--model",
           parsedModel.modelId,
-          input.prompt,
         ],
+        stdin: input.prompt,
         environment: resolvedEnvironment,
         cwd: input.cwd,
       })

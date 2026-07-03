@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  PROVIDERS_WITHOUT_FALLBACK_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
   ModelSelection,
@@ -55,6 +56,13 @@ import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewC
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
+
+function fallbackModelForProvider(driverKind: ProviderDriverKind): string {
+  if (PROVIDERS_WITHOUT_FALLBACK_MODEL.has(driverKind)) {
+    return "";
+  }
+  return DEFAULT_MODEL_BY_PROVIDER[driverKind] ?? DEFAULT_MODEL;
+}
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 8;
@@ -945,7 +953,7 @@ function legacyToModelSelectionByProvider(
           instanceKey,
           modelSelection?.instanceId === instanceKey
             ? modelSelection.model
-            : (DEFAULT_MODEL_BY_PROVIDER[driverKind] ?? DEFAULT_MODEL),
+            : fallbackModelForProvider(driverKind),
           options,
         );
       }
@@ -2681,7 +2689,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               if (opts && opts.length > 0) {
                 nextMap[instanceKey] = createModelSelection(
                   instanceKey,
-                  current?.model ?? DEFAULT_MODEL_BY_PROVIDER[driverKind] ?? DEFAULT_MODEL,
+                  current?.model ?? fallbackModelForProvider(driverKind),
                   opts,
                 );
               } else if (current?.options) {
@@ -2717,8 +2725,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           const instanceKey = options?.instanceId ?? defaultInstanceIdForDriver(normalizedProvider);
           const fallbackModel =
             normalizeModelSlug(options?.model, normalizedProvider) ??
-            DEFAULT_MODEL_BY_PROVIDER[normalizedProvider] ??
-            DEFAULT_MODEL;
+            fallbackModelForProvider(normalizedProvider);
           const providerOpts =
             nextProviderOptions && nextProviderOptions.length > 0 ? nextProviderOptions : undefined;
 

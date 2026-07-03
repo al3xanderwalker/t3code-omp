@@ -7,6 +7,7 @@ import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as P from "effect/Predicate";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
@@ -19,9 +20,14 @@ import { collectStreamAsString } from "./providerSnapshot.ts";
 const decodeJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 const encodeJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
 
-function encodeJsonLine(value: unknown): string {
+function encodeJsonLineExit(value: unknown): Exit.Exit<string, unknown> {
   const result = encodeJsonStringExit(value);
-  return Exit.isSuccess(result) ? result.value : "";
+  return Exit.isSuccess(result) ? Exit.succeed(result.value) : Exit.fail(result.cause);
+}
+
+function nonEmptyDetail(detail: string | undefined, fallback: string): string {
+  const trimmed = detail?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : fallback;
 }
 
 const PI_RUNTIME_ERROR_TAG = "PiRuntimeError";
@@ -40,6 +46,12 @@ export function piRuntimeErrorDetail(cause: unknown): string {
 }
 
 const DEFAULT_PI_REQUEST_TIMEOUT_MS = 30_000;
+const PI_STDERR_TAIL_MAX_CHARS = 8 * 1024;
+
+function appendBoundedText(current: string, chunk: string, maxChars: number): string {
+  const next = `${current}${chunk}`;
+  return next.length > maxChars ? next.slice(next.length - maxChars) : next;
+}
 
 export interface PiCommandResult {
   readonly stdout: string;
@@ -52,6 +64,7 @@ export const runPiCommand = (input: {
   readonly args: ReadonlyArray<string>;
   readonly environment?: NodeJS.ProcessEnv;
   readonly cwd?: string;
+  readonly stdin?: string;
 }): Effect.Effect<PiCommandResult, PiRuntimeError, ChildProcessSpawner.ChildProcessSpawner> =>
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -67,18 +80,31 @@ export const runPiCommand = (input: {
         ...(input.environment ? { env: input.environment } : { extendEnv: true }),
       }),
     );
-    const [stdout, stderr, code] = yield* Effect.all(
-      [collectStreamAsString(child.stdout), collectStreamAsString(child.stderr), child.exitCode],
+    const writeStdin =
+      input.stdin === undefined
+        ? Effect.void
+        : Stream.run(Stream.encodeText(Stream.make(input.stdin)), child.stdin);
+    const result = yield* Effect.all(
+      {
+        stdout: collectStreamAsString(child.stdout),
+        stderr: collectStreamAsString(child.stderr),
+        code: child.exitCode,
+        writeStdin,
+      },
       { concurrency: "unbounded" },
     );
-    const exitCode = Number(code);
-    if (yield* isWindowsCommandNotFound(exitCode, stderr)) {
+    const exitCode = Number(result.code);
+    if (yield* isWindowsCommandNotFound(exitCode, result.stderr)) {
       return yield* new PiRuntimeError({
         operation: "runPiCommand",
         detail: `spawn ${input.binaryPath} ENOENT`,
       });
     }
-    return { stdout, stderr, code: exitCode } satisfies PiCommandResult;
+    return {
+      stdout: result.stdout,
+      stderr: result.stderr,
+      code: exitCode,
+    } satisfies PiCommandResult;
   }).pipe(
     Effect.scoped,
     Effect.mapError((cause) =>
@@ -107,52 +133,6 @@ export function parsePiModelSlug(slug: string | null | undefined): ParsedPiModel
     provider: trimmed.slice(0, separator),
     modelId: trimmed.slice(separator + 1),
   };
-}
-
-export interface PiModelInfo {
-  readonly provider: string;
-  readonly modelId: string;
-  readonly contextWindow: number | undefined;
-  readonly maxTokens: number | undefined;
-  readonly thinking: boolean;
-  readonly images: boolean;
-}
-
-function parseTokenCount(value: string): number | undefined {
-  const match = value.trim().match(/^(\d+(?:\.\d+)?)([KM])?$/i);
-  if (!match?.[1]) return undefined;
-  const base = Number(match[1]);
-  const unit = match[2]?.toUpperCase();
-  const scaled = unit === "M" ? base * 1_000_000 : unit === "K" ? base * 1_000 : base;
-  return Number.isFinite(scaled) ? Math.round(scaled) : undefined;
-}
-
-export function parsePiModelList(stdout: string): ReadonlyArray<PiModelInfo> {
-  const models: Array<PiModelInfo> = [];
-  for (const line of stdout.split("\n")) {
-    const tokens = line.trim().split(/\s+/);
-    if (tokens.length !== 6) continue;
-    const [provider, modelId, context, maxOut, thinking, images] = tokens as [
-      string,
-      string,
-      string,
-      string,
-      string,
-      string,
-    ];
-    if (provider === "provider" || !/^(yes|no)$/.test(thinking) || !/^(yes|no)$/.test(images)) {
-      continue;
-    }
-    models.push({
-      provider,
-      modelId,
-      contextWindow: parseTokenCount(context),
-      maxTokens: parseTokenCount(maxOut),
-      thinking: thinking === "yes",
-      images: images === "yes",
-    });
-  }
-  return models;
 }
 
 export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
@@ -300,6 +280,23 @@ export const PiStateResponseData = Schema.Struct({
 });
 export type PiStateResponseData = typeof PiStateResponseData.Type;
 
+const PiAvailableModel = Schema.Struct({
+  provider: Schema.String,
+  id: Schema.String,
+  name: Schema.optionalKey(Schema.String),
+  reasoning: Schema.optionalKey(Schema.Boolean),
+  contextWindow: Schema.optionalKey(Schema.Number),
+  maxTokens: Schema.optionalKey(Schema.Number),
+});
+export type PiAvailableModel = typeof PiAvailableModel.Type;
+
+const PiAvailableModelsResponseData = Schema.Struct({
+  models: Schema.Array(Schema.Unknown),
+});
+export interface PiAvailableModelsResponseData {
+  readonly models: ReadonlyArray<PiAvailableModel>;
+}
+
 export const PiMessagesResponseData = Schema.Struct({
   messages: Schema.Array(PiThreadMessage),
 });
@@ -380,8 +377,24 @@ export const decodePiSessionStatsExit = Schema.decodeUnknownExit(PiSessionStats)
 export const decodePiStateResponseDataExit = Schema.decodeUnknownExit(PiStateResponseData);
 export const decodePiMessagesResponseDataExit = Schema.decodeUnknownExit(PiMessagesResponseData);
 
+const decodePiAvailableModelExit = Schema.decodeUnknownExit(PiAvailableModel);
+const decodePiAvailableModelsResponseDataShapeExit = Schema.decodeUnknownExit(
+  PiAvailableModelsResponseData,
+);
 const decodePiRpcResponseWithIdExit = Schema.decodeUnknownExit(PiRpcResponseWithId);
 const decodePiRpcEventExit = Schema.decodeUnknownExit(PiRpcEvent);
+
+export function decodePiAvailableModelsResponseDataExit(
+  value: unknown,
+): Exit.Exit<PiAvailableModelsResponseData, unknown> {
+  const dataExit = decodePiAvailableModelsResponseDataShapeExit(value);
+  if (Exit.isFailure(dataExit)) return Exit.fail(dataExit.cause);
+  const models = dataExit.value.models.flatMap((model) => {
+    const modelExit = decodePiAvailableModelExit(model);
+    return Exit.isSuccess(modelExit) ? [modelExit.value] : [];
+  });
+  return Exit.succeed({ models });
+}
 
 export interface PiRpcHandle {
   readonly request: (
@@ -391,6 +404,7 @@ export interface PiRpcHandle {
   readonly notify: (payload: Record<string, unknown>) => Effect.Effect<void>;
   readonly events: Queue.Dequeue<PiRpcEvent>;
   readonly exitCode: Effect.Effect<number>;
+  readonly stderr: Effect.Effect<string>;
 }
 
 export interface SpawnPiRpcInput {
@@ -402,6 +416,10 @@ export interface SpawnPiRpcInput {
   readonly modelSlug?: string;
   readonly thinkingLevel?: string;
   readonly approvalExtensionPath?: string;
+  readonly noSession?: boolean;
+  readonly noTools?: boolean;
+  readonly mcpConfigPath?: string;
+  readonly appendSystemPrompt?: string;
 }
 
 export const spawnPiRpcSession = (
@@ -419,6 +437,10 @@ export const spawnPiRpcSession = (
     const args = [
       "--mode",
       "rpc",
+      ...(input.noSession ? ["--no-session"] : []),
+      ...(input.noTools ? ["--no-tools"] : []),
+      ...(input.mcpConfigPath ? ["--mcp-config", input.mcpConfigPath] : []),
+      ...(input.appendSystemPrompt ? ["--append-system-prompt", input.appendSystemPrompt] : []),
       ...(input.sessionName ? ["--name", input.sessionName] : []),
       ...(parsedModel ? ["--provider", parsedModel.provider, "--model", parsedModel.modelId] : []),
       ...(input.thinkingLevel ? ["--thinking", input.thinkingLevel] : []),
@@ -444,7 +466,9 @@ export const spawnPiRpcSession = (
     );
 
     const stdinQueue = yield* Queue.unbounded<string>();
-    const events = yield* Queue.unbounded<PiRpcEvent>();
+    const events = yield* Queue.bounded<PiRpcEvent>(1_024);
+    const stderrRef = yield* Ref.make("");
+    const closedReasonRef = yield* Ref.make<string | null>(null);
     const pending = new Map<string, Deferred.Deferred<PiRpcResponse, PiRuntimeError>>();
     let requestSequence = 0;
 
@@ -473,22 +497,22 @@ export const spawnPiRpcSession = (
       );
 
     const failPending = (detail: string) =>
-      Effect.sync(() => {
-        const inflight = [...pending.values()];
-        pending.clear();
-        return inflight;
-      }).pipe(
-        Effect.flatMap((inflight) =>
-          Effect.forEach(
-            inflight,
-            (deferred) =>
-              Deferred.fail(deferred, new PiRuntimeError({ operation: "request", detail })).pipe(
-                Effect.ignore,
-              ),
-            { discard: true },
-          ),
-        ),
-      );
+      Effect.gen(function* () {
+        yield* Ref.set(closedReasonRef, detail);
+        const inflight = yield* Effect.sync(() => {
+          const deferreds = [...pending.values()];
+          pending.clear();
+          return deferreds;
+        });
+        yield* Effect.forEach(
+          inflight,
+          (deferred) =>
+            Deferred.fail(deferred, new PiRuntimeError({ operation: "request", detail })).pipe(
+              Effect.ignore,
+            ),
+          { discard: true },
+        );
+      });
 
     yield* Scope.addFinalizer(
       scope,
@@ -544,11 +568,29 @@ export const spawnPiRpcSession = (
       Effect.ignore,
       Effect.forkIn(scope),
     );
-    yield* child.stderr.pipe(Stream.runDrain, Effect.ignore, Effect.forkIn(scope));
+    yield* child.stderr.pipe(
+      Stream.decodeText(),
+      Stream.runForEach((chunk) =>
+        Ref.update(stderrRef, (stderr) =>
+          appendBoundedText(stderr, chunk, PI_STDERR_TAIL_MAX_CHARS),
+        ),
+      ),
+      Effect.ignore,
+      Effect.forkIn(scope),
+    );
 
     const exitCode = child.exitCode.pipe(
       Effect.map(Number),
       Effect.orElseSucceed(() => -1),
+    );
+    const stderr = Ref.get(stderrRef);
+
+    yield* exitCode.pipe(
+      Effect.flatMap((code) =>
+        failPending(`Pi RPC process exited before replying (exit code ${code}).`),
+      ),
+      Effect.ensuring(Queue.shutdown(events).pipe(Effect.ignore)),
+      Effect.forkIn(scope),
     );
 
     const request: PiRpcHandle["request"] = (command, options) => {
@@ -556,9 +598,32 @@ export const spawnPiRpcSession = (
       return Effect.gen(function* () {
         requestSequence += 1;
         const id = `t3-${requestSequence}`;
+        const encodedExit = encodeJsonLineExit({ ...command, id });
+        if (Exit.isFailure(encodedExit)) {
+          return yield* new PiRuntimeError({
+            operation: commandType,
+            detail: `Failed to encode Pi RPC command '${commandType}' as JSON.`,
+            cause: encodedExit.cause,
+          });
+        }
+        const closedReason = yield* Ref.get(closedReasonRef);
+        if (closedReason !== null) {
+          return yield* new PiRuntimeError({
+            operation: commandType,
+            detail: closedReason,
+          });
+        }
         const deferred = yield* Deferred.make<PiRpcResponse, PiRuntimeError>();
         pending.set(id, deferred);
-        yield* Queue.offer(stdinQueue, `${encodeJsonLine({ ...command, id })}\n`);
+        const closedAfterPending = yield* Ref.get(closedReasonRef);
+        if (closedAfterPending !== null) {
+          pending.delete(id);
+          return yield* new PiRuntimeError({
+            operation: commandType,
+            detail: closedAfterPending,
+          });
+        }
+        yield* Queue.offer(stdinQueue, `${encodedExit.value}\n`);
         const response = yield* Deferred.await(deferred).pipe(
           Effect.timeoutOrElse({
             duration: options?.timeoutMs ?? DEFAULT_PI_REQUEST_TIMEOUT_MS,
@@ -575,7 +640,7 @@ export const spawnPiRpcSession = (
         if (!response.success) {
           return yield* new PiRuntimeError({
             operation: commandType,
-            detail: response.error ?? `Pi command '${response.command}' failed.`,
+            detail: nonEmptyDetail(response.error, `Pi command '${response.command}' failed.`),
           });
         }
         return response;
@@ -583,9 +648,16 @@ export const spawnPiRpcSession = (
     };
 
     const notify: PiRpcHandle["notify"] = (payload) =>
-      Queue.offer(stdinQueue, `${encodeJsonLine(payload)}\n`).pipe(Effect.asVoid);
+      Effect.gen(function* () {
+        const encodedExit = encodeJsonLineExit(payload);
+        if (Exit.isFailure(encodedExit)) {
+          yield* Effect.logWarning("Dropped non-JSON-encodable Pi RPC notification.");
+          return;
+        }
+        yield* Queue.offer(stdinQueue, `${encodedExit.value}\n`);
+      });
 
-    return { request, notify, events, exitCode } satisfies PiRpcHandle;
+    return { request, notify, events, exitCode, stderr } satisfies PiRpcHandle;
   });
 
 export interface PiRuntimeShape {
@@ -594,6 +666,7 @@ export interface PiRuntimeShape {
     readonly args: ReadonlyArray<string>;
     readonly environment?: NodeJS.ProcessEnv;
     readonly cwd?: string;
+    readonly stdin?: string;
   }) => Effect.Effect<PiCommandResult, PiRuntimeError>;
   readonly spawnSession: (
     input: SpawnPiRpcInput,

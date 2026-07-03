@@ -869,6 +869,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     projectModelSelection: activeProjectDefaultModelSelection,
     settings,
   });
+  const hasSelectedModel = selectedModel.trim().length > 0;
   const selectedProviderStatus = useMemo(
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
@@ -1163,11 +1164,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (showPlanFollowUpPrompt) {
       return prompt.trim().length > 0 ? "plan:refine" : "plan:implement";
     }
-    return `idle:${composerSendState.hasSendableContent}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}`;
+    return `idle:${composerSendState.hasSendableContent}:${hasSelectedModel}:${isSendBusy}:${isConnecting}:${isPreparingWorktree}`;
   }, [
     activePendingIsResponding,
     activePendingProgress,
     composerSendState.hasSendableContent,
+    hasSelectedModel,
     isConnecting,
     isPreparingWorktree,
     isSendBusy,
@@ -1249,7 +1251,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     noProviderAvailable ||
     projectSelectionRequired ||
     environmentUnavailable !== null ||
-    !composerSendState.hasSendableContent;
+    !composerSendState.hasSendableContent ||
+    !hasSelectedModel;
   const collapsedComposerPrimaryActionLabel = "Send message";
   const showMobilePendingAnswerActions =
     isMobileViewport && !isComposerCollapsedMobile && pendingPrimaryAction !== null;
@@ -1800,12 +1803,16 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (activePendingProgress) {
       return activePendingProgress.isLastQuestion && Boolean(activePendingResolvedAnswers);
     }
-    return showPlanFollowUpPrompt || composerSendState.hasSendableContent;
+    return (
+      (showPlanFollowUpPrompt && hasSelectedModel) ||
+      (composerSendState.hasSendableContent && hasSelectedModel)
+    );
   }, [
     activePendingProgress,
     activePendingResolvedAnswers,
     composerSendState.hasSendableContent,
     environmentUnavailable,
+    hasSelectedModel,
     isConnecting,
     isMobileViewport,
     isSendBusy,
@@ -3162,7 +3169,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     projectSelectionRequired
                   }
                   isPreparingWorktree={isPreparingWorktree}
-                  hasSendableContent={composerSendState.hasSendableContent}
+                  hasSendableContent={
+                    (showPlanFollowUpPrompt || composerSendState.hasSendableContent) &&
+                    hasSelectedModel
+                  }
                   preserveComposerFocusOnPointerDown={isMobileViewport}
                   onPreviousPendingQuestion={onPreviousActivePendingUserInputQuestion}
                   onInterrupt={handleInterruptPrimaryAction}

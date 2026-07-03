@@ -71,6 +71,10 @@
       "types": "./src/toolActivity.ts",
       "import": "./src/toolActivity.ts"
     },
+    "./toolLifecycle": {
+      "types": "./src/toolLifecycle.ts",
+      "import": "./src/toolLifecycle.ts"
+    },
     "./Struct": {
       "types": "./src/Struct.ts",
       "import": "./src/Struct.ts"

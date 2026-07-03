@@ -30,6 +30,7 @@ const runtimeMock = {
       readonly binaryPath: string;
       readonly args: ReadonlyArray<string>;
       readonly cwd: string | undefined;
+      readonly stdin: string | undefined;
     }>,
     results: [] as Array<PiCommandResult>,
     error: null as PiRuntimeError | null,
@@ -55,6 +56,7 @@ const PiRuntimeTestDouble: PiRuntimeShape = {
         binaryPath: input.binaryPath,
         args: input.args,
         cwd: input.cwd,
+        stdin: input.stdin,
       });
       if (runtimeMock.state.error) return yield* runtimeMock.state.error;
       return runtimeMock.state.results.shift() ?? { stdout: "{}", stderr: "", code: 0 };
@@ -131,7 +133,8 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           "--model",
         ]);
         NodeAssert.equal(args[14], "claude-haiku-4-5");
-        NodeAssert.match(String(args.at(-1)), /Staged files:/);
+        NodeAssert.equal(args.includes("Staged files:"), false);
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.stdin), /Staged files:/);
       }),
     ),
   );
@@ -156,10 +159,7 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           body: "Covers provider and adapter flows.",
         });
         NodeAssert.equal(runtimeMock.state.calls.length, 1);
-        NodeAssert.match(
-          String(runtimeMock.state.calls[0]?.args.at(-1)),
-          /GitHub pull request content/,
-        );
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.stdin), /GitHub pull request content/);
       }),
     ),
   );
@@ -177,7 +177,7 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
 
         NodeAssert.deepEqual(branch, { branch: "pi-provider-tests" });
         NodeAssert.equal(runtimeMock.state.calls.length, 1);
-        NodeAssert.match(String(runtimeMock.state.calls[0]?.args.at(-1)), /branch names/);
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.stdin), /branch names/);
       }),
     ),
   );
@@ -195,7 +195,7 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
 
         NodeAssert.deepEqual(title, { title: "Debug Pi provider setup" });
         NodeAssert.equal(runtimeMock.state.calls.length, 1);
-        NodeAssert.match(String(runtimeMock.state.calls[0]?.args.at(-1)), /thread titles/);
+        NodeAssert.match(String(runtimeMock.state.calls[0]?.stdin), /thread titles/);
       }),
     ),
   );

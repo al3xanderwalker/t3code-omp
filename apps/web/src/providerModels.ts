@@ -1,6 +1,7 @@
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
+  PROVIDERS_WITHOUT_FALLBACK_MODEL,
   defaultInstanceIdForDriver,
   ProviderDriverKind,
   type ModelCapabilities,
@@ -91,6 +92,9 @@ export function getDefaultServerModel(
   provider: ProviderDriverKind,
 ): string {
   const models = getProviderModels(providers, provider);
+  if (PROVIDERS_WITHOUT_FALLBACK_MODEL.has(provider)) {
+    return models.find((model) => !model.isCustom)?.slug ?? "";
+  }
   return (
     models.find((model) => model.isDefault && !model.isCustom)?.slug ??
     models.find((model) => !model.isCustom)?.slug ??

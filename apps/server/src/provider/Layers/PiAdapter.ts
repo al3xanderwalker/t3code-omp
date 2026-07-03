@@ -9,11 +9,11 @@ import {
   RuntimeRequestId,
   ThreadId,
   type ThreadTokenUsageSnapshot,
-  type ToolLifecycleItemType,
   TurnId,
   type UserInputQuestion,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { toToolLifecycleItemType } from "@t3tools/shared/toolLifecycle";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
@@ -23,11 +23,13 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
+import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
 import {
   ProviderAdapterProcessError,
   ProviderAdapterRequestError,
@@ -57,8 +59,47 @@ import {
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
+const encodeJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
+const PI_MCP_BRIDGE_TOKEN_ENV = "T3_MCP_BEARER_TOKEN";
+const PI_T3_BROWSER_SYSTEM_PROMPT = `
+## T3 Code collaborative browser
+
+T3 Code exposes its in-app collaborative browser through the configured MCP server named "t3-code".
+
+For browser work, first try direct preview tools such as preview_status, preview_open, preview_navigate, and preview_snapshot if they are available.
+
+If direct preview tools are not available, use the Pi MCP proxy tool:
+- mcp({ search: "preview" }) to discover the T3 preview tools.
+- mcp({ tool: "preview_status", args: "{}" }) before deciding browser automation is unavailable.
+- mcp({ tool: "preview_open", args: "{}" }) if no automation-capable preview is attached.
+- Use the discovered preview_navigate, preview_snapshot, and focused interaction tools through mcp({ tool, args }) for browser navigation, inspection, interaction, screenshots, and recordings.
+
+Do not switch to Pi agent-browser, global Chrome automation, standalone Playwright, or another external browser merely because a preview MCP call fails. Inspect actionable preview MCP errors and retry with corrected arguments where appropriate.
+`.trim();
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+
+type PiMcpBridge =
+  | { readonly _tag: "Absent" }
+  | {
+      readonly _tag: "Ready";
+      readonly configPath: string;
+      readonly bridgeDir: string;
+      readonly providerSessionId: string;
+      readonly environment: NodeJS.ProcessEnv;
+    }
+  | {
+      readonly _tag: "Failed";
+      readonly providerSessionId: string;
+      readonly detail: string;
+    };
+
+type PiMcpBridgeWarning =
+  | {
+      readonly _tag: "ConfigFailed";
+      readonly bridge: Extract<PiMcpBridge, { readonly _tag: "Failed" }>;
+    }
+  | { readonly _tag: "SpawnRetried"; readonly detail: string };
 
 interface PiTurnSnapshot {
   readonly id: TurnId;
@@ -83,7 +124,9 @@ interface PiSessionContext {
   currentThinking: string | undefined;
   lastStopReason: string | undefined;
   messageSequence: number;
+  toolSequence: number;
   compactionSequence: number;
+  readonly fallbackToolCallIds: Map<string, string>;
   readonly stopped: Ref.Ref<boolean>;
   readonly sessionScope: Scope.Closeable;
 }
@@ -102,26 +145,6 @@ type EventBaseInput = {
   readonly requestId?: string | undefined;
   readonly raw?: unknown;
 };
-
-function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
-  const normalized = toolName.toLowerCase();
-  if (normalized.includes("bash") || normalized.includes("command")) {
-    return "command_execution";
-  }
-  if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
-    return "file_change";
-  }
-  if (normalized.includes("web")) {
-    return "web_search";
-  }
-  if (normalized.includes("image")) {
-    return "image_view";
-  }
-  if (normalized.includes("task") || normalized.includes("agent")) {
-    return "collab_agent_tool_call";
-  }
-  return "dynamic_tool_call";
-}
 
 function approvalRequestType(
   tool: string,
@@ -149,6 +172,52 @@ function textFromContentBlocks(content: PiMessageContent | undefined): string {
 function toolResultText(result: PiToolResult | undefined): string | undefined {
   const text = textFromContentBlocks(result?.content);
   return text.length > 0 ? text : undefined;
+}
+
+function stripBearerPrefix(authorizationHeader: string): string {
+  return authorizationHeader.replace(/^Bearer\s+/iu, "").trim();
+}
+
+function appendStderrDetail(detail: string, stderr: string): string {
+  const trimmed = stderr.trim();
+  if (trimmed.length === 0) return detail;
+  const separator = /[.!?]$/.test(detail.trim()) ? " stderr: " : ". stderr: ";
+  return `${detail}${separator}${trimmed}`;
+}
+
+function encodeJsonString(value: unknown): string {
+  const encoded = encodeJsonStringExit(value);
+  return Exit.isSuccess(encoded) ? encoded.value : "{}";
+}
+
+function nonEmptyDetail(detail: string | undefined, fallback: string): string {
+  const trimmed = detail?.trim() ?? "";
+  return trimmed.length > 0 ? trimmed : fallback;
+}
+
+function fallbackToolCallItemId(
+  context: PiSessionContext,
+  event: PiRpcEvent,
+  toolName: string,
+): string {
+  if ("toolCallId" in event && typeof event.toolCallId === "string") {
+    const toolCallId = event.toolCallId.trim();
+    if (toolCallId.length > 0) return toolCallId;
+  }
+  const key = `${context.messageSequence}:${toolName}`;
+  const existing = context.fallbackToolCallIds.get(key);
+  if (existing) {
+    if (event.type === "tool_execution_end") {
+      context.fallbackToolCallIds.delete(key);
+    }
+    return existing;
+  }
+  context.toolSequence += 1;
+  const itemId = `pi-tool-${context.messageSequence}-${context.toolSequence}`;
+  if (event.type !== "tool_execution_end") {
+    context.fallbackToolCallIds.set(key, itemId);
+  }
+  return itemId;
 }
 
 function tokenUsageFromStats(stats: PiSessionStats): ThreadTokenUsageSnapshot | undefined {
@@ -267,7 +336,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         : undefined);
     const managedNativeEventLogger =
       options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
-    const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+    const runtimeEvents = yield* Queue.bounded<ProviderRuntimeEvent>(1_024);
     const sessions = new Map<ThreadId, PiSessionContext>();
     const extensionDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-" }).pipe(
       Effect.mapError(
@@ -312,6 +381,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         Effect.map(({ eventId, createdAt }) => ({
           eventId,
           provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
           threadId: input.threadId,
           createdAt,
           ...(input.turnId ? { turnId: input.turnId } : {}),
@@ -356,6 +426,88 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             ),
           ).pipe(Effect.catchCause(() => Effect.void))
         : Effect.void;
+
+    const makeMcpBridge = (
+      threadId: ThreadId,
+    ): Effect.Effect<PiMcpBridge, ProviderAdapterRequestError> =>
+      Effect.gen(function* () {
+        const mcpSession = McpProviderSession.readMcpProviderSession(threadId);
+        if (!mcpSession) return { _tag: "Absent" } satisfies PiMcpBridge;
+
+        const bridgeId = yield* randomUUIDv4;
+        const bridgeDir = path.join(serverConfig.stateDir, "pi-mcp", bridgeId);
+        const configPath = path.join(bridgeDir, "mcp.json");
+        const config = {
+          settings: {
+            toolPrefix: "none",
+            disableProxyTool: false,
+            directTools: false,
+          },
+          mcpServers: {
+            "t3-code": {
+              url: mcpSession.endpoint,
+              auth: "bearer",
+              bearerTokenEnv: PI_MCP_BRIDGE_TOKEN_ENV,
+              lifecycle: "lazy",
+              exposeResources: false,
+            },
+          },
+        };
+
+        const writeExit = yield* Effect.gen(function* () {
+          yield* fs.makeDirectory(bridgeDir, { recursive: true });
+          yield* fs.writeFileString(configPath, `${encodeJsonString(config)}\n`);
+        }).pipe(Effect.exit);
+
+        if (Exit.isFailure(writeExit)) {
+          return {
+            _tag: "Failed",
+            providerSessionId: mcpSession.providerSessionId,
+            detail: piRuntimeErrorDetail(Cause.squash(writeExit.cause)),
+          } satisfies PiMcpBridge;
+        }
+
+        return {
+          _tag: "Ready",
+          configPath,
+          bridgeDir,
+          providerSessionId: mcpSession.providerSessionId,
+          environment: {
+            [PI_MCP_BRIDGE_TOKEN_ENV]: stripBearerPrefix(mcpSession.authorizationHeader),
+          },
+        } satisfies PiMcpBridge;
+      });
+
+    const emitMcpBridgeWarning = Effect.fn("emitMcpBridgeWarning")(function* (
+      threadId: ThreadId,
+      warning: PiMcpBridgeWarning,
+    ) {
+      if (warning._tag === "ConfigFailed") {
+        yield* emit({
+          ...(yield* buildEventBase({ threadId })),
+          type: "runtime.warning",
+          payload: {
+            message:
+              "Pi MCP bridge could not be configured; preview browser tools unavailable for this session",
+            detail: {
+              providerSessionId: warning.bridge.providerSessionId,
+              reason: warning.bridge.detail,
+            },
+          },
+        });
+        return;
+      }
+
+      yield* emit({
+        ...(yield* buildEventBase({ threadId })),
+        type: "runtime.warning",
+        payload: {
+          message:
+            "Pi MCP bridge unavailable; run `pi install npm:pi-mcp-adapter` for preview browser support.",
+          detail: { reason: warning.detail },
+        },
+      });
+    });
 
     const emitUnexpectedExit = Effect.fn("emitUnexpectedExit")(function* (
       context: PiSessionContext,
@@ -549,8 +701,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         case "tool_execution_start":
         case "tool_execution_update":
         case "tool_execution_end": {
-          const toolCallId = event.toolCallId ?? `pi-tool-${context.messageSequence}`;
           const toolName = event.toolName ?? "tool";
+          const toolCallId = fallbackToolCallItemId(context, event, toolName);
           const isEnd = event.type === "tool_execution_end";
           const isError = isEnd && event.isError === true;
           const detail = isEnd
@@ -716,45 +868,113 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         const thinkingLevel = getModelSelectionStringOptionValue(input.modelSelection, "thinking");
+        const mcpBridge = yield* makeMcpBridge(input.threadId);
+        const initialBridgeWarning =
+          mcpBridge._tag === "Failed"
+            ? ({ _tag: "ConfigFailed", bridge: mcpBridge } satisfies PiMcpBridgeWarning)
+            : undefined;
+        const makeBridgeCleanup = (bridge: Extract<PiMcpBridge, { readonly _tag: "Ready" }>) =>
+          fs
+            .remove(bridge.bridgeDir, { recursive: true, force: true })
+            .pipe(Effect.catchCause(() => Effect.void));
+        const spawnInput = (bridgeEnabled: boolean) => {
+          const bridge = bridgeEnabled && mcpBridge._tag === "Ready" ? mcpBridge : undefined;
+          const spawnEnvironment = bridge
+            ? { ...(options?.environment ?? process.env), ...bridge.environment }
+            : options?.environment;
+          return {
+            binaryPath: piSettings.binaryPath,
+            cwd: directory,
+            ...(spawnEnvironment ? { environment: spawnEnvironment } : {}),
+            runtimeMode: input.runtimeMode,
+            sessionName: `T3 Code ${input.threadId}`,
+            ...(input.modelSelection ? { modelSlug: input.modelSelection.model } : {}),
+            ...(thinkingLevel ? { thinkingLevel } : {}),
+            approvalExtensionPath,
+            ...(bridge
+              ? {
+                  mcpConfigPath: bridge.configPath,
+                  appendSystemPrompt: PI_T3_BROWSER_SYSTEM_PROMPT,
+                }
+              : {}),
+          };
+        };
+        const startAttempt = (sessionScope: Scope.Closeable, bridgeEnabled: boolean) =>
+          Effect.gen(function* () {
+            if (bridgeEnabled && mcpBridge._tag === "Ready") {
+              yield* Scope.addFinalizer(sessionScope, makeBridgeCleanup(mcpBridge));
+            }
+            let rpc: PiRpcHandle | undefined;
+            const startedExit = yield* Effect.exit(
+              Effect.gen(function* () {
+                rpc = yield* piRuntime.spawnSession(spawnInput(bridgeEnabled));
+                const state = yield* rpc.request({ type: "get_state" }, { timeoutMs: 20_000 });
+                const stateDataExit = decodePiStateResponseDataExit(state.data);
+                if (Exit.isFailure(stateDataExit)) {
+                  return yield* new PiRuntimeError({
+                    operation: "get_state",
+                    detail: "Pi returned malformed state data.",
+                  });
+                }
+                return {
+                  sessionScope,
+                  rpc,
+                  piSessionId: stateDataExit.value.sessionId,
+                };
+              }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
+            );
+            if (Exit.isFailure(startedExit)) {
+              const stderr = rpc ? yield* rpc.stderr : "";
+              return {
+                _tag: "Failure" as const,
+                cause: startedExit.cause,
+                detail: appendStderrDetail(
+                  piRuntimeErrorDetail(Cause.squash(startedExit.cause)),
+                  stderr,
+                ),
+              };
+            }
+            return { _tag: "Success" as const, value: startedExit.value };
+          });
+
         const started = yield* Effect.gen(function* () {
           const sessionScope = yield* Scope.make();
-          const startedExit = yield* Effect.exit(
-            Effect.gen(function* () {
-              const rpc = yield* piRuntime.spawnSession({
-                binaryPath: piSettings.binaryPath,
-                cwd: directory,
-                ...(options?.environment ? { environment: options.environment } : {}),
-                runtimeMode: input.runtimeMode,
-                sessionName: `T3 Code ${input.threadId}`,
-                ...(input.modelSelection ? { modelSlug: input.modelSelection.model } : {}),
-                ...(thinkingLevel ? { thinkingLevel } : {}),
-                approvalExtensionPath,
-              });
-              const state = yield* rpc.request({ type: "get_state" }, { timeoutMs: 20_000 });
-              const stateDataExit = decodePiStateResponseDataExit(state.data);
-              if (Exit.isFailure(stateDataExit)) {
-                return yield* new PiRuntimeError({
-                  operation: "get_state",
-                  detail: "Pi returned malformed state data.",
-                });
-              }
+          const firstAttempt = yield* startAttempt(sessionScope, mcpBridge._tag === "Ready");
+          if (firstAttempt._tag === "Success") {
+            return {
+              ...firstAttempt.value,
+              ...(initialBridgeWarning ? { bridgeWarning: initialBridgeWarning } : {}),
+            };
+          }
+
+          yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
+          if (mcpBridge._tag === "Ready") {
+            const retryScope = yield* Scope.make();
+            const retryAttempt = yield* startAttempt(retryScope, false);
+            if (retryAttempt._tag === "Success") {
               return {
-                sessionScope,
-                rpc,
-                piSessionId: stateDataExit.value.sessionId,
+                ...retryAttempt.value,
+                bridgeWarning: {
+                  _tag: "SpawnRetried",
+                  detail: firstAttempt.detail,
+                } satisfies PiMcpBridgeWarning,
               };
-            }).pipe(Effect.provideService(Scope.Scope, sessionScope)),
-          );
-          if (Exit.isFailure(startedExit)) {
-            yield* Scope.close(sessionScope, Exit.void).pipe(Effect.ignore);
+            }
+            yield* Scope.close(retryScope, Exit.void).pipe(Effect.ignore);
             return yield* new ProviderAdapterProcessError({
               provider: PROVIDER,
               threadId: input.threadId,
-              detail: piRuntimeErrorDetail(Cause.squash(startedExit.cause)),
-              cause: startedExit.cause,
+              detail: retryAttempt.detail,
+              cause: retryAttempt.cause,
             });
           }
-          return startedExit.value;
+
+          return yield* new ProviderAdapterProcessError({
+            provider: PROVIDER,
+            threadId: input.threadId,
+            detail: firstAttempt.detail,
+            cause: firstAttempt.cause,
+          });
         });
 
         const raceWinner = sessions.get(input.threadId);
@@ -785,7 +1005,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           currentThinking: thinkingLevel,
           lastStopReason: undefined,
           messageSequence: 0,
+          toolSequence: 0,
           compactionSequence: 0,
+          fallbackToolCallIds: new Map(),
           stopped: yield* Ref.make(false),
           sessionScope: started.sessionScope,
         };
@@ -802,7 +1024,11 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               if (yield* Ref.get(context.stopped)) {
                 return;
               }
-              yield* emitUnexpectedExit(context, `Pi process exited unexpectedly (${code}).`);
+              const stderr = yield* started.rpc.stderr;
+              yield* emitUnexpectedExit(
+                context,
+                appendStderrDetail(`Pi process exited unexpectedly (${code}).`, stderr),
+              );
             }),
           ),
           Effect.forkIn(started.sessionScope),
@@ -818,6 +1044,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           type: "thread.started",
           payload: started.piSessionId ? { providerThreadId: started.piSessionId } : {},
         });
+        if (started.bridgeWarning) {
+          yield* emitMcpBridgeWarning(input.threadId, started.bridgeWarning);
+        }
 
         return session;
       },
@@ -852,6 +1081,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           issue: "Pi turns require text input or at least one image attachment.",
         });
       }
+      let nextModelSlug = context.currentModelSlug;
+      let nextThinking = context.currentThinking;
       if (modelSelection?.model && modelSelection.model !== context.currentModelSlug) {
         const parsedModel = parsePiModelSlug(modelSelection.model);
         if (!parsedModel) {
@@ -868,15 +1099,17 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             modelId: parsedModel.modelId,
           })
           .pipe(Effect.mapError(toRequestError));
-        context.currentModelSlug = modelSelection.model;
+        nextModelSlug = modelSelection.model;
       }
       const thinkingLevel = getModelSelectionStringOptionValue(modelSelection, "thinking");
       if (thinkingLevel && thinkingLevel !== context.currentThinking) {
         yield* context.rpc
           .request({ type: "set_thinking_level", level: thinkingLevel })
           .pipe(Effect.mapError(toRequestError));
-        context.currentThinking = thinkingLevel;
+        nextThinking = thinkingLevel;
       }
+      context.currentModelSlug = nextModelSlug;
+      context.currentThinking = nextThinking;
 
       context.activeTurnId = turnId;
       yield* updateProviderSession(
@@ -912,16 +1145,17 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             steeringTurnId !== undefined
               ? Effect.void
               : Effect.gen(function* () {
+                  const reason = nonEmptyDetail(requestError.detail, "Pi prompt request failed.");
                   context.activeTurnId = undefined;
                   yield* updateProviderSession(
                     context,
-                    { status: "ready", lastError: requestError.detail },
+                    { status: "ready", lastError: reason },
                     { clearActiveTurnId: true },
                   );
                   yield* emit({
                     ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
                     type: "turn.aborted",
-                    payload: { reason: requestError.detail },
+                    payload: { reason },
                   });
                 }),
           ),
@@ -934,7 +1168,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
         const abortedTurnId = turnId ?? context.activeTurnId;
-        yield* context.rpc.request({ type: "abort" }).pipe(Effect.mapError(toRequestError));
+        yield* context.rpc
+          .request({ type: "abort" }, { timeoutMs: 2_000 })
+          .pipe(Effect.ignore({ log: true }));
         context.activeTurnId = undefined;
         context.lastStopReason = undefined;
         yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
@@ -1052,11 +1288,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
       const turns: Array<PiTurnSnapshot> = [];
       for (const message of messages) {
-        if (message.role === "assistant") {
+        if (message.role === "user") {
           turns.push({ id: TurnId.make(`pi-snapshot-turn-${turns.length}`), items: [message] });
-        } else if (message.role === "toolResult" && turns.length > 0) {
-          turns[turns.length - 1]?.items.push(message);
+          continue;
         }
+        if (turns.length === 0) {
+          turns.push({ id: TurnId.make(`pi-snapshot-turn-${turns.length}`), items: [] });
+        }
+        turns[turns.length - 1]?.items.push(message);
       }
       return { threadId, turns };
     });

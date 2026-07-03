@@ -1,4 +1,10 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  DEFAULT_MODEL,
+  DEFAULT_MODEL_BY_PROVIDER,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type UnifiedSettings } from "@t3tools/contracts/settings";
 import { describe, expect, it } from "vite-plus/test";
 import { deriveProviderInstanceEntries } from "./providerInstances";
@@ -7,6 +13,7 @@ import {
   resolveAppModelSelectionForInstance,
   resolveAppModelSelectionState,
 } from "./modelSelection";
+import { getDefaultServerModel } from "./providerModels";
 
 function provider(input: {
   provider?: ProviderDriverKind;
@@ -301,5 +308,75 @@ describe("instance-scoped model selection", () => {
       instanceId: ProviderInstanceId.make("claude_openrouter"),
       model: "openai/gpt-5.5",
     });
+  });
+});
+
+describe("provider default model resolution", () => {
+  it("returns an empty model for Pi when no models are available", () => {
+    expect(
+      getDefaultServerModel(
+        [provider({ provider: ProviderDriverKind.make("pi"), instanceId: "pi", models: [] })],
+        ProviderDriverKind.make("pi"),
+      ),
+    ).toBe("");
+  });
+
+  it("does not use custom Pi models as implicit defaults", () => {
+    const pi = provider({ provider: ProviderDriverKind.make("pi"), instanceId: "pi", models: [] });
+
+    expect(
+      getDefaultServerModel(
+        [
+          {
+            ...pi,
+            models: [
+              {
+                slug: "claude-haiku-4-5",
+                name: "claude-haiku-4-5",
+                isCustom: true,
+                capabilities: {},
+              },
+            ],
+          },
+        ],
+        ProviderDriverKind.make("pi"),
+      ),
+    ).toBe("");
+  });
+
+  it("keeps fallback defaults for providers with fallback models", () => {
+    expect(
+      getDefaultServerModel(
+        [provider({ provider: ProviderDriverKind.make("codex"), instanceId: "codex", models: [] })],
+        ProviderDriverKind.make("codex"),
+      ),
+    ).toBe(DEFAULT_MODEL);
+    expect(
+      getDefaultServerModel(
+        [
+          provider({
+            provider: ProviderDriverKind.make("claudeAgent"),
+            instanceId: "claudeAgent",
+            models: [],
+          }),
+        ],
+        ProviderDriverKind.make("claudeAgent"),
+      ),
+    ).toBe(DEFAULT_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")]);
+  });
+
+  it("uses the first real Pi model when discovery succeeds", () => {
+    expect(
+      getDefaultServerModel(
+        [
+          provider({
+            provider: ProviderDriverKind.make("pi"),
+            instanceId: "pi",
+            models: ["anthropic/claude-haiku-4-5", "anthropic/claude-sonnet-5"],
+          }),
+        ],
+        ProviderDriverKind.make("pi"),
+      ),
+    ).toBe("anthropic/claude-haiku-4-5");
   });
 });

@@ -65,8 +65,12 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
   const selectedModel =
     selectedInstanceOptions.find((option) => option.slug === props.model) ??
     selectedInstanceOptions[0];
-  const triggerTitle = selectedModel ? getTriggerDisplayModelName(selectedModel) : props.model;
-  const triggerLabel = selectedModel ? getTriggerDisplayModelLabel(selectedModel) : props.model;
+  const triggerTitle = selectedModel
+    ? getTriggerDisplayModelName(selectedModel)
+    : props.model || "No models";
+  const triggerLabel = selectedModel
+    ? getTriggerDisplayModelLabel(selectedModel)
+    : props.model || "No models";
   const duplicateDriverCount = props.instanceEntries.filter(
     (entry) => activeEntry !== null && entry.driverKind === activeEntry.driverKind,
   ).length;

@@ -296,9 +296,22 @@ function formatProcessName(command: string): string {
   return segments.at(-1) ?? normalized;
 }
 
+function isAgentProcessCommand(command: string): boolean {
+  const executable = formatProcessName(command)
+    .replace(/\.(cmd|exe|bat)$/i, "")
+    .toLowerCase();
+  return (
+    executable === "codex" ||
+    executable === "claude" ||
+    executable === "opencode" ||
+    executable === "cursor" ||
+    executable === "pi"
+  );
+}
+
 function formatProcessType(process: ServerProcessDiagnosticsEntry): string {
   if (process.depth > 0) return "Subprocess";
-  if (/\b(codex|claude|opencode|cursor|pi)\b/i.test(process.command)) return "Agent";
+  if (isAgentProcessCommand(process.command)) return "Agent";
   return "Process";
 }
 

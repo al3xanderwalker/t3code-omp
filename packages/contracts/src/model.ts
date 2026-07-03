@@ -153,8 +153,11 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CURSOR_DRIVER_KIND]: "auto",
   [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
-  [PI_DRIVER_KIND]: "anthropic/claude-sonnet-5",
 };
+
+export const PROVIDERS_WITHOUT_FALLBACK_MODEL: ReadonlySet<ProviderDriverKind> = new Set([
+  PI_DRIVER_KIND,
+]);
 
 /** Per-provider text generation model defaults. */
 export const DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER: Partial<
