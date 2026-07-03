@@ -4,6 +4,10 @@ import {
   parsePiApprovalTitle,
   parsePiModelList,
   parsePiModelSlug,
+  PI_APPROVAL_EXTENSION_SOURCE,
+  PI_APPROVAL_OPTION_ALLOW,
+  PI_APPROVAL_OPTION_ALLOW_ALWAYS,
+  PI_APPROVAL_OPTION_DENY,
   PI_APPROVAL_TITLE_PREFIX,
   toPiApprovalSelection,
 } from "./piRuntime.ts";
@@ -65,6 +69,16 @@ describe("parsePiApprovalTitle", () => {
   it("extracts the tool and detail from a marker title", () => {
     const title = `${PI_APPROVAL_TITLE_PREFIX}{"tool":"bash","detail":"rm -rf /tmp/x"}`;
     expect(parsePiApprovalTitle(title)).toEqual({ tool: "bash", detail: "rm -rf /tmp/x" });
+  });
+
+  it("keeps the injected extension marker parseable by the adapter", () => {
+    expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_TITLE_PREFIX);
+    expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_OPTION_ALLOW);
+    expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_OPTION_ALLOW_ALWAYS);
+    expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_OPTION_DENY);
+    expect(
+      parsePiApprovalTitle(`${PI_APPROVAL_TITLE_PREFIX}{"tool":"write","detail":"src/app.ts"}`),
+    ).toEqual({ tool: "write", detail: "src/app.ts" });
   });
 
   it("returns null for regular dialog titles and malformed markers", () => {
