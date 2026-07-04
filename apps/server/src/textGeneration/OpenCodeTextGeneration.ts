@@ -13,7 +13,7 @@ import {
   type OpenCodeSettings,
 } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { getModelSelectionStringOptionValue, parseProviderModelSlug } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
 import * as ServerConfig from "../config.ts";
@@ -366,7 +366,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
     readonly modelSelection: ModelSelection;
     readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
   }) {
-    const parsedModel = OpenCodeRuntime.parseOpenCodeModelSlug(input.modelSelection.model);
+    const parsedModel = parseProviderModelSlug(input.modelSelection.model);
     if (!parsedModel) {
       return yield* new TextGenerationError({
         operation: input.operation,
@@ -414,15 +414,15 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
           operation: input.operation,
           cwd: input.cwd,
           sessionId: session.data.id,
-          providerId: parsedModel.providerID,
-          modelId: parsedModel.modelID,
+          providerId: parsedModel.provider,
+          modelId: parsedModel.modelId,
         };
 
         const result = yield* Effect.tryPromise({
           try: () =>
             client.session.prompt({
               sessionID: session.data.id,
-              model: parsedModel,
+              model: { providerID: parsedModel.provider, modelID: parsedModel.modelId },
               ...(selectedAgent ? { agent: selectedAgent } : {}),
               ...(selectedVariant ? { variant: selectedVariant } : {}),
               parts: [{ type: "text", text: input.prompt }, ...fileParts],

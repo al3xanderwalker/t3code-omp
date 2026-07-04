@@ -12,7 +12,7 @@ import {
   TurnId,
   type UserInputQuestion,
 } from "@t3tools/contracts";
-import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import { getModelSelectionStringOptionValue, parseProviderModelSlug } from "@t3tools/shared/model";
 import { toToolLifecycleItemType } from "@t3tools/shared/toolLifecycle";
 import * as Cause from "effect/Cause";
 import * as Crypto from "effect/Crypto";
@@ -36,14 +36,14 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  type ProviderAdapterError,
 } from "../Errors.ts";
-import type { PiAdapterShape } from "../Services/PiAdapter.ts";
+import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import {
   decodePiMessagesResponseDataExit,
   decodePiSessionStatsExit,
   decodePiStateResponseDataExit,
   parsePiApprovalTitle,
-  parsePiModelSlug,
   PI_APPROVAL_EXTENSION_SOURCE,
   PiRuntime,
   type PiApprovalRequestPayload,
@@ -56,7 +56,7 @@ import {
   piRuntimeErrorDetail,
   toPiApprovalSelection,
 } from "../piRuntime.ts";
-import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import type { EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
 const encodeJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
@@ -78,6 +78,7 @@ Do not switch to Pi agent-browser, global Chrome automation, standalone Playwrig
 `.trim();
 
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
+type PiAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
 
 type PiMcpBridge =
   | { readonly _tag: "Absent" }
@@ -134,7 +135,6 @@ interface PiSessionContext {
 export interface PiAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
   readonly environment?: NodeJS.ProcessEnv;
-  readonly nativeEventLogPath?: string;
   readonly nativeEventLogger?: EventNdjsonLogger;
 }
 
@@ -329,13 +329,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
     const crypto = yield* Crypto.Crypto;
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const nativeEventLogger =
-      options?.nativeEventLogger ??
-      (options?.nativeEventLogPath !== undefined
-        ? yield* makeEventNdjsonLogger(options.nativeEventLogPath, { stream: "native" })
-        : undefined);
-    const managedNativeEventLogger =
-      options?.nativeEventLogger === undefined ? nativeEventLogger : undefined;
+    const nativeEventLogger = options?.nativeEventLogger;
     const runtimeEvents = yield* Queue.bounded<ProviderRuntimeEvent>(1_024);
     const sessions = new Map<ThreadId, PiSessionContext>();
     const extensionDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-" }).pipe(
@@ -401,9 +395,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           concurrency: "unbounded",
           discard: true,
         });
-        if (managedNativeEventLogger !== undefined) {
-          yield* managedNativeEventLogger.close();
-        }
       }).pipe(Effect.ensuring(Queue.shutdown(runtimeEvents))),
     );
 
@@ -1084,7 +1075,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       let nextModelSlug = context.currentModelSlug;
       let nextThinking = context.currentThinking;
       if (modelSelection?.model && modelSelection.model !== context.currentModelSlug) {
-        const parsedModel = parsePiModelSlug(modelSelection.model);
+        const parsedModel = parseProviderModelSlug(modelSelection.model);
         if (!parsedModel) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,

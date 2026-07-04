@@ -103,11 +103,6 @@ export interface OpenCodeInventory {
   readonly agents: ReadonlyArray<Agent>;
 }
 
-export interface ParsedOpenCodeModelSlug {
-  readonly providerID: string;
-  readonly modelID: string;
-}
-
 export interface OpenCodeRuntimeShape {
   /**
    * Spawns a local OpenCode server process. Its lifetime is bound to the caller's
@@ -290,7 +285,6 @@ export function parseOpenCodeModelSlug(
     modelID: trimmed.slice(separator + 1),
   };
 }
-
 export function openCodeQuestionId(
   index: number,
   question: QuestionRequest["questions"][number],

@@ -25,7 +25,8 @@ import { beforeEach } from "vite-plus/test";
 
 import { ServerConfig } from "../../config.ts";
 import * as McpProviderSession from "../../mcp/McpProviderSession.ts";
-import type { PiAdapterShape } from "../Services/PiAdapter.ts";
+import type { ProviderAdapterError } from "../Errors.ts";
+import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import {
   PI_APPROVAL_TITLE_PREFIX,
   PiRuntime,
@@ -36,6 +37,8 @@ import {
   type SpawnPiRpcInput,
 } from "../piRuntime.ts";
 import { makePiAdapter } from "./PiAdapter.ts";
+
+type PiAdapterShape = ProviderAdapterShape<ProviderAdapterError>;
 
 class PiAdapter extends Context.Service<PiAdapter, PiAdapterShape>()(
   "t3/provider/Layers/PiAdapter.test/PiAdapter",

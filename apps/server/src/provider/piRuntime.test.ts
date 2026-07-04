@@ -12,7 +12,6 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import {
   decodePiAvailableModelsResponseDataExit,
   parsePiApprovalTitle,
-  parsePiModelSlug,
   PI_APPROVAL_EXTENSION_SOURCE,
   PI_APPROVAL_OPTION_ALLOW,
   PI_APPROVAL_OPTION_ALLOW_ALWAYS,
@@ -74,29 +73,6 @@ function spawnWithFakeProcess<A, E, R>(
 function responseLine(value: unknown): Uint8Array {
   return encoder.encode(`${JSON.stringify(value)}\n`);
 }
-
-describe("parsePiModelSlug", () => {
-  it("splits provider and model id on the first slash", () => {
-    expect(parsePiModelSlug("anthropic/claude-sonnet-5")).toEqual({
-      provider: "anthropic",
-      modelId: "claude-sonnet-5",
-    });
-  });
-
-  it("keeps slashes inside the model id (openrouter-style ids)", () => {
-    expect(parsePiModelSlug("openrouter/qwen/qwen3-coder")).toEqual({
-      provider: "openrouter",
-      modelId: "qwen/qwen3-coder",
-    });
-  });
-
-  it("rejects slugs without a provider segment", () => {
-    expect(parsePiModelSlug("claude-sonnet-5")).toBeNull();
-    expect(parsePiModelSlug("/model")).toBeNull();
-    expect(parsePiModelSlug("provider/")).toBeNull();
-    expect(parsePiModelSlug(undefined)).toBeNull();
-  });
-});
 
 describe("decodePiAvailableModelsResponseDataExit", () => {
   it("keeps structured models and skips malformed entries", () => {

@@ -1,7 +1,4 @@
 import {
-  DEFAULT_MODEL,
-  DEFAULT_MODEL_BY_PROVIDER,
-  PROVIDERS_WITHOUT_FALLBACK_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
   ModelSelection,
@@ -50,19 +47,12 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { useShallow } from "zustand/react/shallow";
 import { createDebouncedStorage, createMemoryStorage } from "./lib/storage";
-import { getDefaultServerModel } from "./providerModels";
+import { getDefaultServerModel, getFallbackServerModel } from "./providerModels";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import { ReviewCommentContextSchema, type ReviewCommentContext } from "./reviewCommentContext";
 const isRuntimeMode = Schema.is(RuntimeMode);
 const isProviderDriverKind = Schema.is(ProviderDriverKind);
 const isReviewCommentContext = Schema.is(ReviewCommentContextSchema);
-
-function fallbackModelForProvider(driverKind: ProviderDriverKind): string {
-  if (PROVIDERS_WITHOUT_FALLBACK_MODEL.has(driverKind)) {
-    return "";
-  }
-  return DEFAULT_MODEL_BY_PROVIDER[driverKind] ?? DEFAULT_MODEL;
-}
 
 export const COMPOSER_DRAFT_STORAGE_KEY = "t3code:composer-drafts:v1";
 const COMPOSER_DRAFT_STORAGE_VERSION = 8;
@@ -953,7 +943,7 @@ function legacyToModelSelectionByProvider(
           instanceKey,
           modelSelection?.instanceId === instanceKey
             ? modelSelection.model
-            : fallbackModelForProvider(driverKind),
+            : getFallbackServerModel(driverKind),
           options,
         );
       }
@@ -2689,7 +2679,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               if (opts && opts.length > 0) {
                 nextMap[instanceKey] = createModelSelection(
                   instanceKey,
-                  current?.model ?? fallbackModelForProvider(driverKind),
+                  current?.model ?? getFallbackServerModel(driverKind),
                   opts,
                 );
               } else if (current?.options) {
@@ -2725,7 +2715,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
           const instanceKey = options?.instanceId ?? defaultInstanceIdForDriver(normalizedProvider);
           const fallbackModel =
             normalizeModelSlug(options?.model, normalizedProvider) ??
-            fallbackModelForProvider(normalizedProvider);
+            getFallbackServerModel(normalizedProvider);
           const providerOpts =
             nextProviderOptions && nextProviderOptions.length > 0 ? nextProviderOptions : undefined;
 

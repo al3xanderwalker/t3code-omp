@@ -1,7 +1,6 @@
 import {
   type ApprovalRequestId,
   DEFAULT_MODEL,
-  PROVIDERS_WITHOUT_FALLBACK_MODEL,
   defaultInstanceIdForDriver,
   type EnvironmentId,
   type MessageId,
@@ -4729,9 +4728,10 @@ function ChatViewContent(props: ChatViewProps) {
       }
     }
     const title = truncate(titleSeed);
-    const fallbackCreateModel = PROVIDERS_WITHOUT_FALLBACK_MODEL.has(ctxSelectedProvider)
-      ? ""
-      : activeProject.defaultModelSelection?.model || DEFAULT_MODEL;
+    const fallbackCreateModel =
+      ctxSelectedProvider === ProviderDriverKind.make("pi")
+        ? ""
+        : activeProject.defaultModelSelection?.model || DEFAULT_MODEL;
     const threadCreateModelSelection = createModelSelection(
       ctxSelectedModelSelection.instanceId,
       ctxSelectedModel || fallbackCreateModel,

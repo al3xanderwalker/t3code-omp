@@ -9,7 +9,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { createModelCapabilities, titleCaseSlug } from "@t3tools/shared/model";
 import {
   decodePiAvailableModelsResponseDataExit,
   PI_THINKING_LEVELS,
@@ -40,14 +40,6 @@ const DEFAULT_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities
 
 const PI_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
 const PI_CODEX_THINKING_LEVELS = [...PI_THINKING_LEVELS, "xhigh"] as const;
-
-function titleCaseSlug(value: string): string {
-  return value
-    .split(/[-_/]+/)
-    .filter(Boolean)
-    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
-    .join(" ");
-}
 
 function thinkingLabel(level: string): string {
   return level === "xhigh" ? "Extra High" : titleCaseSlug(level);

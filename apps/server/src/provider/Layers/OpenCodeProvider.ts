@@ -8,7 +8,7 @@ import * as Data from "effect/Data";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 
-import { createModelCapabilities } from "@t3tools/shared/model";
+import { createModelCapabilities, titleCaseSlug } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
@@ -132,16 +132,6 @@ function formatOpenCodeProbeError(input: {
       ? `Failed to execute OpenCode CLI health check: ${detail}`
       : "Failed to execute OpenCode CLI health check.",
   };
-}
-
-function titleCaseSlug(value: string): string {
-  const segments: Array<string> = [];
-  for (const segment of value.split(/[-_/]+/)) {
-    if (segment.length > 0) {
-      segments.push(segment.charAt(0).toUpperCase() + segment.slice(1));
-    }
-  }
-  return segments.join(" ");
 }
 
 function inferDefaultVariant(

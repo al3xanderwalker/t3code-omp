@@ -13,9 +13,9 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import { parseProviderModelSlug } from "@t3tools/shared/model";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
-import { isWindowsCommandNotFound } from "../processRunner.ts";
-import { collectStreamAsString } from "./providerSnapshot.ts";
+import * as ProcessRunner from "../processRunner.ts";
 
 const decodeJsonStringExit = Schema.decodeUnknownExit(Schema.UnknownFromJsonString);
 const encodeJsonStringExit = Schema.encodeUnknownExit(Schema.UnknownFromJsonString);
@@ -57,82 +57,6 @@ export interface PiCommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number;
-}
-
-export const runPiCommand = (input: {
-  readonly binaryPath: string;
-  readonly args: ReadonlyArray<string>;
-  readonly environment?: NodeJS.ProcessEnv;
-  readonly cwd?: string;
-  readonly stdin?: string;
-}): Effect.Effect<PiCommandResult, PiRuntimeError, ChildProcessSpawner.ChildProcessSpawner> =>
-  Effect.gen(function* () {
-    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const spawnCommand = yield* resolveSpawnCommand(
-      input.binaryPath,
-      input.args,
-      input.environment ? { env: input.environment } : {},
-    );
-    const child = yield* spawner.spawn(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        shell: spawnCommand.shell,
-        ...(input.cwd ? { cwd: input.cwd } : {}),
-        ...(input.environment ? { env: input.environment } : { extendEnv: true }),
-      }),
-    );
-    const writeStdin =
-      input.stdin === undefined
-        ? Effect.void
-        : Stream.run(Stream.encodeText(Stream.make(input.stdin)), child.stdin);
-    const result = yield* Effect.all(
-      {
-        stdout: collectStreamAsString(child.stdout),
-        stderr: collectStreamAsString(child.stderr),
-        code: child.exitCode,
-        writeStdin,
-      },
-      { concurrency: "unbounded" },
-    );
-    const exitCode = Number(result.code);
-    if (yield* isWindowsCommandNotFound(exitCode, result.stderr)) {
-      return yield* new PiRuntimeError({
-        operation: "runPiCommand",
-        detail: `spawn ${input.binaryPath} ENOENT`,
-      });
-    }
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      code: exitCode,
-    } satisfies PiCommandResult;
-  }).pipe(
-    Effect.scoped,
-    Effect.mapError((cause) =>
-      PiRuntimeError.is(cause)
-        ? cause
-        : new PiRuntimeError({
-            operation: "runPiCommand",
-            detail: `Failed to execute '${input.binaryPath} ${input.args.join(" ")}': ${piRuntimeErrorDetail(cause)}`,
-            cause,
-          }),
-    ),
-    Effect.withSpan("pi.runCommand"),
-  );
-
-export interface ParsedPiModelSlug {
-  readonly provider: string;
-  readonly modelId: string;
-}
-
-export function parsePiModelSlug(slug: string | null | undefined): ParsedPiModelSlug | null {
-  if (typeof slug !== "string") return null;
-  const trimmed = slug.trim();
-  const separator = trimmed.indexOf("/");
-  if (separator <= 0 || separator === trimmed.length - 1) return null;
-  return {
-    provider: trimmed.slice(0, separator),
-    modelId: trimmed.slice(separator + 1),
-  };
 }
 
 export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
@@ -432,7 +356,7 @@ export const spawnPiRpcSession = (
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const scope = yield* Scope.Scope;
-    const parsedModel = parsePiModelSlug(input.modelSlug);
+    const parsedModel = parseProviderModelSlug(input.modelSlug);
 
     const args = [
       "--mode",
@@ -675,10 +599,34 @@ export interface PiRuntimeShape {
 
 export const makePiRuntime = Effect.gen(function* () {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
   const runCommand: PiRuntimeShape["runCommand"] = (input) =>
-    runPiCommand(input).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-    );
+    processRunner
+      .run({
+        command: input.binaryPath,
+        args: input.args,
+        cwd: input.cwd,
+        env: input.environment,
+        stdin: input.stdin,
+      })
+      .pipe(
+        Effect.map(
+          (result): PiCommandResult => ({
+            stdout: result.stdout,
+            stderr: result.stderr,
+            code: Number(result.code ?? -1),
+          }),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new PiRuntimeError({
+              operation: "runCommand",
+              detail: `Failed to execute '${input.binaryPath} ${input.args.join(" ")}': ${piRuntimeErrorDetail(cause)}`,
+              cause,
+            }),
+        ),
+        Effect.withSpan("pi.runCommand"),
+      );
   const spawnSession: PiRuntimeShape["spawnSession"] = (input) =>
     spawnPiRpcSession(input).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
@@ -694,4 +642,6 @@ export class PiRuntime extends Context.Service<PiRuntime, PiRuntimeShape>()(
   "t3/provider/piRuntime",
 ) {}
 
-export const PiRuntimeLive = Layer.effect(PiRuntime, makePiRuntime);
+export const PiRuntimeLive = Layer.effect(PiRuntime, makePiRuntime).pipe(
+  Layer.provide(ProcessRunner.layer),
+);

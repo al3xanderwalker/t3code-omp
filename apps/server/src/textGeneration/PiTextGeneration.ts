@@ -3,9 +3,10 @@ import * as Schema from "effect/Schema";
 
 import { TextGenerationError, type ModelSelection, type PiSettings } from "@t3tools/contracts";
 import { sanitizeBranchFragment, sanitizeFeatureBranchName } from "@t3tools/shared/git";
+import { parseProviderModelSlug } from "@t3tools/shared/model";
 import { extractJsonObject } from "@t3tools/shared/schemaJson";
 
-import { parsePiModelSlug, PiRuntime, piRuntimeErrorDetail } from "../provider/piRuntime.ts";
+import { PiRuntime, piRuntimeErrorDetail } from "../provider/piRuntime.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -39,7 +40,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
     readonly outputSchemaJson: S;
     readonly modelSelection: ModelSelection;
   }) {
-    const parsedModel = parsePiModelSlug(input.modelSelection.model);
+    const parsedModel = parseProviderModelSlug(input.modelSelection.model);
     if (!parsedModel) {
       return yield* new TextGenerationError({
         operation: input.operation,

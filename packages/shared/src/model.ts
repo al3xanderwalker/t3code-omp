@@ -17,6 +17,11 @@ export interface SelectableModelOption {
   name: string;
 }
 
+export interface ProviderModelSlug {
+  readonly provider: string;
+  readonly modelId: string;
+}
+
 export function createModelCapabilities(input: {
   optionDescriptors: ReadonlyArray<ProviderOptionDescriptor>;
 }): ModelCapabilities {
@@ -255,6 +260,23 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   }
 
   return model.trim() || null;
+export function parseProviderModelSlug(slug: string | null | undefined): ProviderModelSlug | null {
+  if (typeof slug !== "string") return null;
+  const trimmed = slug.trim();
+  const separator = trimmed.indexOf("/");
+  if (separator <= 0 || separator === trimmed.length - 1) return null;
+  return {
+    provider: trimmed.slice(0, separator),
+    modelId: trimmed.slice(separator + 1),
+  };
+}
+
+export function titleCaseSlug(value: string): string {
+  return value
+    .split(/[-_/]+/)
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
 }
 
 export function resolveSelectableModel(
