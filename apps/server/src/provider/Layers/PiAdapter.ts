@@ -151,8 +151,9 @@ type EventBaseInput = {
 function approvalRequestType(
   tool: string,
 ): "command_execution_approval" | "file_change_approval" | "unknown" {
-  if (tool === "bash") return "command_execution_approval";
-  if (tool === "edit" || tool === "write") return "file_change_approval";
+  const lifecycle = toToolLifecycleItemType(tool);
+  if (lifecycle === "command_execution") return "command_execution_approval";
+  if (lifecycle === "file_change") return "file_change_approval";
   return "unknown";
 }
 
@@ -222,20 +223,21 @@ function fallbackToolCallItemId(
     }
     return itemId;
   }
-  if (explicit) {
-    if (event.type === "tool_execution_end" && pending) {
-      const index = pending.indexOf(explicit);
-      if (index >= 0) pending.splice(index, 1);
+  if (explicit && pending?.includes(explicit)) {
+    if (event.type === "tool_execution_end") {
+      pending.splice(pending.indexOf(explicit), 1);
       if (pending.length === 0) context.fallbackToolCallIds.delete(key);
     }
     return explicit;
   }
+  // An explicit id that was never queued means the start omitted toolCallId
+  // and got a minted id; resolve FIFO so the lifecycle shares one item id.
   if (pending) {
     const oldest = event.type === "tool_execution_end" ? pending.shift() : pending[0];
     if (pending.length === 0) context.fallbackToolCallIds.delete(key);
     if (oldest !== undefined) return oldest;
   }
-  return mintToolItemId(context);
+  return explicit ?? mintToolItemId(context);
 }
 
 function tokenUsageFromStats(stats: PiSessionStats): ThreadTokenUsageSnapshot | undefined {
@@ -348,7 +350,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
     const fs = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     const nativeEventLogger = options?.nativeEventLogger;
-    const runtimeEvents = yield* Queue.bounded<ProviderRuntimeEvent>(1_024);
+    const runtimeEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessions = new Map<ThreadId, PiSessionContext>();
     const extensionDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-pi-" }).pipe(
       Effect.mapError(
@@ -807,14 +809,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         case "agent_end": {
-          if (!turnId) break;
+          const endedTurnId = context.activeTurnId;
+          if (!endedTurnId) break;
           yield* settlePendingRequestsAsCancelled(context);
+          // interruptTurn may clear the turn while we settle; it already
+          // emitted turn.aborted, so don't emit a second terminal event.
+          if (context.activeTurnId !== endedTurnId) break;
           context.activeTurnId = undefined;
           const failed = context.lastStopReason === "error";
           context.lastStopReason = undefined;
           yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
           yield* emit({
-            ...(yield* buildEventBase({ threadId, turnId })),
+            ...(yield* buildEventBase({ threadId, turnId: endedTurnId })),
             type: "turn.completed",
             payload: failed
               ? { state: "failed", errorMessage: "Pi reported an error while completing the turn." }
@@ -1046,13 +1052,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           });
         });
 
+        const createdAt = yield* nowIso;
+        const stopped = yield* Ref.make(false);
+        // No yields between this check and sessions.set below, so a concurrent
+        // startSession for the same thread cannot register a second context.
         const raceWinner = sessions.get(input.threadId);
         if (raceWinner) {
           yield* Scope.close(started.sessionScope, Exit.void).pipe(Effect.ignore);
           return raceWinner.session;
         }
 
-        const createdAt = yield* nowIso;
         const session: ProviderSession = {
           provider: PROVIDER,
           providerInstanceId: boundInstanceId,
@@ -1077,7 +1086,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           toolSequence: 0,
           compactionSequence: 0,
           fallbackToolCallIds: new Map(),
-          stopped: yield* Ref.make(false),
+          stopped,
           sessionScope: started.sessionScope,
         };
         sessions.set(input.threadId, context);
@@ -1151,8 +1160,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
       const steeringTurnId = context.activeTurnId;
       const turnId = steeringTurnId ?? TurnId.make(`pi-turn-${yield* randomUUIDv4}`);
-      let nextModelSlug = context.currentModelSlug;
-      let nextThinking = context.currentThinking;
       if (modelSelection?.model && modelSelection.model !== context.currentModelSlug) {
         const parsedModel = parseProviderModelSlug(modelSelection.model);
         if (!parsedModel) {
@@ -1169,17 +1176,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             modelId: parsedModel.modelId,
           })
           .pipe(Effect.mapError(toRequestError));
-        nextModelSlug = modelSelection.model;
+        // Commit immediately: Pi has switched even if a later RPC fails.
+        context.currentModelSlug = modelSelection.model;
       }
       const thinkingLevel = getModelSelectionStringOptionValue(modelSelection, "thinking");
       if (thinkingLevel && thinkingLevel !== context.currentThinking) {
         yield* context.rpc
           .request({ type: "set_thinking_level", level: thinkingLevel })
           .pipe(Effect.mapError(toRequestError));
-        nextThinking = thinkingLevel;
+        context.currentThinking = thinkingLevel;
       }
-      context.currentModelSlug = nextModelSlug;
-      context.currentThinking = nextThinking;
 
       context.activeTurnId = turnId;
       yield* updateProviderSession(
@@ -1385,10 +1391,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
         sessions.clear();
-        yield* Effect.forEach(contexts, (context) => Effect.ignoreCause(stopPiContext(context)), {
-          concurrency: "unbounded",
-          discard: true,
-        });
+        yield* Effect.forEach(
+          contexts,
+          (context) =>
+            Effect.gen(function* () {
+              yield* Effect.ignoreCause(settlePendingRequestsAsCancelled(context));
+              yield* Effect.ignoreCause(stopPiContext(context));
+            }),
+          { concurrency: "unbounded", discard: true },
+        );
       });
 
     return {

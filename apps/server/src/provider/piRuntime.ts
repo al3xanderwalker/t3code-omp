@@ -76,7 +76,7 @@ export default function t3codeApprovals(pi) {
   pi.on("tool_call", async (event, ctx) => {
     if (MODE === "full-access") return;
     const tool = event.toolName;
-    const isEditTool = tool === "edit" || tool === "write";
+    const isEditTool = tool === "edit" || tool === "write" || tool === "multiedit" || tool === "patch";
     const gated = tool === "bash" || (isEditTool && MODE !== "auto-accept-edits");
     if (!gated || alwaysAllowed.has(tool)) return;
     const input = event.input ?? {};
@@ -159,6 +159,8 @@ const PiRpcResponseWithId = Schema.Struct({
 const PiContentBlock = Schema.Struct({
   type: Schema.String,
   text: Schema.optionalKey(Schema.String),
+  data: Schema.optionalKey(Schema.String),
+  mimeType: Schema.optionalKey(Schema.String),
 });
 export type PiContentBlock = typeof PiContentBlock.Type;
 
@@ -393,7 +395,7 @@ export const spawnPiRpcSession = (
     );
 
     const stdinQueue = yield* Queue.unbounded<string>();
-    const events = yield* Queue.bounded<PiRpcEvent>(1_024);
+    const events = yield* Queue.unbounded<PiRpcEvent>();
     const stderrRef = yield* Ref.make("");
     const closedReasonRef = yield* Ref.make<string | null>(null);
     const pending = new Map<string, Deferred.Deferred<PiRpcResponse, PiRuntimeError>>();

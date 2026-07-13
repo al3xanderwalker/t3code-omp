@@ -543,7 +543,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
     }),
   );
 
-  it.effect("does not cache a model switch when thinking setup fails", () =>
+  it.effect("keeps the model switch cached when thinking setup fails", () =>
     Effect.gen(function* () {
       const adapter = yield* PiAdapter;
       const threadId = asThreadId("thread-pi-model-thinking-failure");
@@ -569,11 +569,12 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
 
       NodeAssert.equal(firstError._tag, "ProviderAdapterRequestError");
       NodeAssert.equal(failedSession?.model, undefined);
+      // Pi already switched models before thinking failed, so the retry only
+      // needs to re-apply the thinking level.
       NodeAssert.deepEqual(runtimeMock.state.requests.map(commandType), [
         "get_state",
         "set_model",
         "set_thinking_level",
-        "set_model",
         "set_thinking_level",
         "prompt",
       ]);
