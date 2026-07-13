@@ -620,7 +620,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         type: "extension_ui_request",
         id: "approval-1",
         method: "select",
-        title: `${PI_APPROVAL_TITLE_PREFIX}{"tool":"bash","detail":"printf hi"}`,
+        title: `${PI_APPROVAL_TITLE_PREFIX}{"version":1,"tool":"bash","detail":"printf hi"}`,
         options: ["allow", "allow-always", "deny"],
       });
       yield* Effect.yieldNow;
@@ -694,6 +694,36 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         (toolEvents[1]?.payload as { itemType?: string } | undefined)?.itemType,
         "file_change",
       );
+    }),
+  );
+
+  it.effect("keeps an id-less tool lifecycle correlated across message boundaries", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-tool-message-boundary");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* startPiSession(adapter, threadId);
+      yield* adapter.sendTurn({ threadId, input: "Use a tool" });
+      const handle = runtimeMock.state.handles[0]!;
+      yield* Queue.offer(handle.eventsQueue, { type: "tool_execution_start", toolName: "bash" });
+      yield* Queue.offer(handle.eventsQueue, { type: "message_start" });
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "tool_execution_end",
+        toolName: "bash",
+        result: { content: "done" },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const toolEvents = events.filter(
+        (event) => event.type === "item.started" || event.type === "item.completed",
+      );
+      NodeAssert.equal(toolEvents.length, 2);
+      NodeAssert.equal(String(toolEvents[0]?.itemId), String(toolEvents[1]?.itemId));
     }),
   );
 
@@ -825,6 +855,88 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.deepEqual(events[3]?.payload, {
         message: "Cancelled unsupported Pi extension editor dialog: Edit generated config",
       });
+    }),
+  );
+
+  it.effect("cancels unknown and malformed approval dialogs without exposing protocol titles", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-invalid-dialog");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(4),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* startPiSession(adapter, threadId);
+      const handle = runtimeMock.state.handles[0]!;
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "extension_ui_request",
+        id: "unknown-1",
+        method: "date-picker",
+        title: "Pick a date",
+      });
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "extension_ui_request",
+        id: "malformed-1",
+        method: "select",
+        title: `${PI_APPROVAL_TITLE_PREFIX}{bad json`,
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["session.started", "thread.started", "runtime.warning", "runtime.warning"],
+      );
+      NodeAssert.deepEqual(runtimeMock.state.notifications, [
+        { type: "extension_ui_response", id: "unknown-1", cancelled: true },
+        { type: "extension_ui_response", id: "malformed-1", cancelled: true },
+      ]);
+    }),
+  );
+
+  it.effect("settles an open Pi approval when interrupted", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-interrupt-approval");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* startPiSession(adapter, threadId);
+      yield* adapter.sendTurn({ threadId, input: "Do work" });
+      const handle = runtimeMock.state.handles[0]!;
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "extension_ui_request",
+        id: "approval-interrupt",
+        method: "select",
+        title: `${PI_APPROVAL_TITLE_PREFIX}{"version":1,"tool":"bash","detail":"pwd"}`,
+        options: ["allow", "deny"],
+      });
+      yield* Effect.yieldNow;
+      yield* adapter.interruptTurn(threadId);
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        [
+          "session.started",
+          "thread.started",
+          "turn.started",
+          "request.opened",
+          "request.resolved",
+          "turn.aborted",
+        ],
+      );
+      NodeAssert.equal(
+        (events[4]?.payload as { readonly decision?: string } | undefined)?.decision,
+        "cancel",
+      );
+      NodeAssert.deepEqual(runtimeMock.state.notifications, [
+        { type: "extension_ui_response", id: "approval-interrupt", cancelled: true },
+      ]);
     }),
   );
 

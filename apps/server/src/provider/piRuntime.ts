@@ -25,7 +25,7 @@ function encodeJsonLineExit(value: unknown): Exit.Exit<string, unknown> {
   return Exit.isSuccess(result) ? Exit.succeed(result.value) : Exit.fail(result.cause);
 }
 
-function nonEmptyDetail(detail: string | undefined, fallback: string): string {
+export function nonEmptyDetail(detail: string | undefined, fallback: string): string {
   const trimmed = detail?.trim() ?? "";
   return trimmed.length > 0 ? trimmed : fallback;
 }
@@ -62,6 +62,7 @@ export interface PiCommandResult {
 export const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high"] as const;
 
 export const PI_APPROVAL_TITLE_PREFIX = "T3_APPROVAL ";
+export const PI_APPROVAL_PROTOCOL_VERSION = 1;
 export const PI_APPROVAL_OPTION_ALLOW = "allow";
 export const PI_APPROVAL_OPTION_ALLOW_ALWAYS = "allow-always";
 export const PI_APPROVAL_OPTION_DENY = "deny";
@@ -82,7 +83,7 @@ export default function t3codeApprovals(pi) {
     const detail =
       tool === "bash" ? String(input.command ?? "") : String(input.path ?? input.file_path ?? "");
     const choice = await ctx.ui.select(
-      "${PI_APPROVAL_TITLE_PREFIX}" + JSON.stringify({ tool, detail }),
+      "${PI_APPROVAL_TITLE_PREFIX}" + JSON.stringify({ version: ${PI_APPROVAL_PROTOCOL_VERSION}, tool, detail }),
       ["${PI_APPROVAL_OPTION_ALLOW}", "${PI_APPROVAL_OPTION_ALLOW_ALWAYS}", "${PI_APPROVAL_OPTION_DENY}"],
     );
     if (choice === "${PI_APPROVAL_OPTION_ALLOW_ALWAYS}") {
@@ -113,8 +114,10 @@ export function parsePiApprovalTitle(title: unknown): PiApprovalRequestPayload |
   const parsed = result.value;
   if (parsed && typeof parsed === "object" && "tool" in parsed) {
     const record = parsed as Record<string, unknown>;
+    if (record.version !== PI_APPROVAL_PROTOCOL_VERSION || typeof record.tool !== "string")
+      return null;
     return {
-      tool: typeof record.tool === "string" ? record.tool : "unknown",
+      tool: record.tool,
       detail: typeof record.detail === "string" ? record.detail : "",
     };
   }

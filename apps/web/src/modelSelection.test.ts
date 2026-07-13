@@ -321,7 +321,7 @@ describe("provider default model resolution", () => {
     ).toBe("");
   });
 
-  it("does not use custom Pi models as implicit defaults", () => {
+  it("uses a configured custom Pi model when discovery has no model", () => {
     const pi = provider({ provider: ProviderDriverKind.make("pi"), instanceId: "pi", models: [] });
 
     expect(
@@ -341,7 +341,7 @@ describe("provider default model resolution", () => {
         ],
         ProviderDriverKind.make("pi"),
       ),
-    ).toBe("");
+    ).toBe("claude-haiku-4-5");
   });
 
   it("keeps fallback defaults for providers with fallback models", () => {

@@ -44,6 +44,7 @@ import {
   decodePiSessionStatsExit,
   decodePiStateResponseDataExit,
   parsePiApprovalTitle,
+  PI_APPROVAL_TITLE_PREFIX,
   PI_APPROVAL_EXTENSION_SOURCE,
   PiRuntime,
   type PiApprovalRequestPayload,
@@ -53,6 +54,7 @@ import {
   type PiSessionStats,
   type PiToolResult,
   PiRuntimeError,
+  nonEmptyDetail,
   piRuntimeErrorDetail,
   toPiApprovalSelection,
 } from "../piRuntime.ts";
@@ -127,7 +129,7 @@ interface PiSessionContext {
   messageSequence: number;
   toolSequence: number;
   compactionSequence: number;
-  readonly fallbackToolCallIds: Map<string, string>;
+  readonly fallbackToolCallIds: Map<string, Array<string>>;
   readonly stopped: Ref.Ref<boolean>;
   readonly sessionScope: Scope.Closeable;
 }
@@ -190,34 +192,50 @@ function encodeJsonString(value: unknown): string {
   return Exit.isSuccess(encoded) ? encoded.value : "{}";
 }
 
-function nonEmptyDetail(detail: string | undefined, fallback: string): string {
-  const trimmed = detail?.trim() ?? "";
-  return trimmed.length > 0 ? trimmed : fallback;
+function mintToolItemId(context: PiSessionContext): string {
+  context.toolSequence += 1;
+  return `pi-tool-${context.messageSequence}-${context.toolSequence}`;
 }
 
+// Pi may include toolCallId on some lifecycle events and omit it on others for
+// the same invocation, so starts enqueue their id per tool and id-less
+// updates/ends resolve FIFO against the oldest in-flight invocation.
 function fallbackToolCallItemId(
   context: PiSessionContext,
   event: PiRpcEvent,
   toolName: string,
 ): string {
-  if ("toolCallId" in event && typeof event.toolCallId === "string") {
-    const toolCallId = event.toolCallId.trim();
-    if (toolCallId.length > 0) return toolCallId;
-  }
-  const key = `${context.messageSequence}:${toolName}`;
-  const existing = context.fallbackToolCallIds.get(key);
-  if (existing) {
-    if (event.type === "tool_execution_end") {
-      context.fallbackToolCallIds.delete(key);
+  const key = toolName;
+  const pending = context.fallbackToolCallIds.get(key);
+  const explicit =
+    "toolCallId" in event &&
+    typeof event.toolCallId === "string" &&
+    event.toolCallId.trim().length > 0
+      ? event.toolCallId.trim()
+      : undefined;
+  if (event.type === "tool_execution_start") {
+    const itemId = explicit ?? mintToolItemId(context);
+    if (pending) {
+      pending.push(itemId);
+    } else {
+      context.fallbackToolCallIds.set(key, [itemId]);
     }
-    return existing;
+    return itemId;
   }
-  context.toolSequence += 1;
-  const itemId = `pi-tool-${context.messageSequence}-${context.toolSequence}`;
-  if (event.type !== "tool_execution_end") {
-    context.fallbackToolCallIds.set(key, itemId);
+  if (explicit) {
+    if (event.type === "tool_execution_end" && pending) {
+      const index = pending.indexOf(explicit);
+      if (index >= 0) pending.splice(index, 1);
+      if (pending.length === 0) context.fallbackToolCallIds.delete(key);
+    }
+    return explicit;
   }
-  return itemId;
+  if (pending) {
+    const oldest = event.type === "tool_execution_end" ? pending.shift() : pending[0];
+    if (pending.length === 0) context.fallbackToolCallIds.delete(key);
+    if (oldest !== undefined) return oldest;
+  }
+  return mintToolItemId(context);
 }
 
 function tokenUsageFromStats(stats: PiSessionStats): ThreadTokenUsageSnapshot | undefined {
@@ -391,15 +409,52 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       Effect.gen(function* () {
         const contexts = [...sessions.values()];
         sessions.clear();
-        yield* Effect.forEach(contexts, (context) => Effect.ignoreCause(stopPiContext(context)), {
-          concurrency: "unbounded",
-          discard: true,
-        });
+        yield* Effect.forEach(
+          contexts,
+          (context) =>
+            Effect.gen(function* () {
+              yield* Effect.ignoreCause(settlePendingRequestsAsCancelled(context));
+              yield* Effect.ignoreCause(stopPiContext(context));
+            }),
+          { concurrency: "unbounded", discard: true },
+        );
       }).pipe(Effect.ensuring(Queue.shutdown(runtimeEvents))),
     );
 
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEvents, event).pipe(Effect.asVoid);
+    const settlePendingRequestsAsCancelled = Effect.fn("settlePendingRequestsAsCancelled")(
+      function* (context: PiSessionContext) {
+        const threadId = context.session.threadId;
+        const turnId = context.activeTurnId;
+        for (const [requestId, approval] of context.pendingApprovals) {
+          context.pendingApprovals.delete(requestId);
+          yield* context.rpc.notify({
+            type: "extension_ui_response",
+            id: requestId,
+            cancelled: true,
+          });
+          yield* emit({
+            ...(yield* buildEventBase({ threadId, turnId, requestId })),
+            type: "request.resolved",
+            payload: { requestType: approvalRequestType(approval.tool), decision: "cancel" },
+          });
+        }
+        for (const [requestId] of context.pendingDialogs) {
+          context.pendingDialogs.delete(requestId);
+          yield* context.rpc.notify({
+            type: "extension_ui_response",
+            id: requestId,
+            cancelled: true,
+          });
+          yield* emit({
+            ...(yield* buildEventBase({ threadId, turnId, requestId })),
+            type: "user-input.resolved",
+            payload: { answers: { [requestId]: "" } },
+          });
+        }
+      },
+    );
     const writeNativeEventBestEffort = (threadId: ThreadId, event: PiRpcEvent) =>
       nativeEventLogger
         ? Effect.flatMap(nowIso, (observedAt) =>
@@ -504,10 +559,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       context: PiSessionContext,
       message: string,
     ) {
-      if (yield* Ref.getAndSet(context.stopped, true)) {
-        return;
-      }
+      if (yield* Ref.getAndSet(context.stopped, true)) return;
       const turnId = context.activeTurnId;
+      yield* settlePendingRequestsAsCancelled(context).pipe(Effect.ignore);
       sessions.delete(context.session.threadId);
       yield* emit({
         ...(yield* buildEventBase({ threadId: context.session.threadId, turnId })),
@@ -573,6 +627,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         method !== "input" &&
         method !== "editor"
       ) {
+        yield* context.rpc.notify({
+          type: "extension_ui_response",
+          id: uiRequestId,
+          cancelled: true,
+        });
+        yield* emit({
+          ...(yield* buildEventBase({ threadId, turnId, raw: event })),
+          type: "runtime.warning",
+          payload: { message: `Cancelled unsupported Pi extension ${method} dialog.` },
+        });
         return;
       }
 
@@ -587,6 +651,19 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             requestType: approvalRequestType(approval.tool),
             detail: approval.detail.length > 0 ? approval.detail : approval.tool,
           },
+        });
+        return;
+      }
+      if (method === "select" && title.startsWith(PI_APPROVAL_TITLE_PREFIX)) {
+        yield* context.rpc.notify({
+          type: "extension_ui_response",
+          id: uiRequestId,
+          cancelled: true,
+        });
+        yield* emit({
+          ...(yield* buildEventBase({ threadId, turnId, raw: event })),
+          type: "runtime.warning",
+          payload: { message: "Cancelled malformed Pi approval dialog." },
         });
         return;
       }
@@ -731,6 +808,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
         case "agent_end": {
           if (!turnId) break;
+          yield* settlePendingRequestsAsCancelled(context);
           context.activeTurnId = undefined;
           const failed = context.lastStopReason === "error";
           context.lastStopReason = undefined;
@@ -1045,8 +1123,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
     const sendTurn: PiAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
       const context = ensureSessionContext(sessions, input.threadId);
-      const steeringTurnId = context.activeTurnId;
-      const turnId = steeringTurnId ?? TurnId.make(`pi-turn-${yield* randomUUIDv4}`);
       const modelSelection =
         input.modelSelection ??
         (context.session.model
@@ -1072,6 +1148,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           issue: "Pi turns require text input or at least one image attachment.",
         });
       }
+
+      const steeringTurnId = context.activeTurnId;
+      const turnId = steeringTurnId ?? TurnId.make(`pi-turn-${yield* randomUUIDv4}`);
       let nextModelSlug = context.currentModelSlug;
       let nextThinking = context.currentThinking;
       if (modelSelection?.model && modelSelection.model !== context.currentModelSlug) {
@@ -1159,6 +1238,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       function* (threadId, turnId) {
         const context = ensureSessionContext(sessions, threadId);
         const abortedTurnId = turnId ?? context.activeTurnId;
+        yield* settlePendingRequestsAsCancelled(context);
         yield* context.rpc
           .request({ type: "abort" }, { timeoutMs: 2_000 })
           .pipe(Effect.ignore({ log: true }));
@@ -1243,6 +1323,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         if (!context) {
           throw new ProviderAdapterSessionNotFoundError({ provider: PROVIDER, threadId });
         }
+        yield* settlePendingRequestsAsCancelled(context);
         const stopped = yield* stopPiContext(context);
         sessions.delete(threadId);
         if (!stopped) {

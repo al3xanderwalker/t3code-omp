@@ -179,7 +179,7 @@ describe("spawnPiRpcSession", () => {
 
 describe("parsePiApprovalTitle", () => {
   it("extracts the tool and detail from a marker title", () => {
-    const title = `${PI_APPROVAL_TITLE_PREFIX}{"tool":"bash","detail":"rm -rf /tmp/x"}`;
+    const title = `${PI_APPROVAL_TITLE_PREFIX}{"version":1,"tool":"bash","detail":"rm -rf /tmp/x"}`;
     expect(parsePiApprovalTitle(title)).toEqual({ tool: "bash", detail: "rm -rf /tmp/x" });
   });
 
@@ -189,7 +189,9 @@ describe("parsePiApprovalTitle", () => {
     expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_OPTION_ALLOW_ALWAYS);
     expect(PI_APPROVAL_EXTENSION_SOURCE).toContain(PI_APPROVAL_OPTION_DENY);
     expect(
-      parsePiApprovalTitle(`${PI_APPROVAL_TITLE_PREFIX}{"tool":"write","detail":"src/app.ts"}`),
+      parsePiApprovalTitle(
+        `${PI_APPROVAL_TITLE_PREFIX}{"version":1,"tool":"write","detail":"src/app.ts"}`,
+      ),
     ).toEqual({ tool: "write", detail: "src/app.ts" });
   });
 
