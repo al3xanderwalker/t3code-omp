@@ -1,3 +1,27 @@
+/**
+ * Multi-instance validation slices for `ProviderInstanceRegistryLive`.
+ *
+ * Two axes of the driver/registry refactor are exercised here:
+ *
+ *  1. **Same driver, many instances** — the "multi-instance codex slice"
+ *     describe block below configures two independent `codex` instances and
+ *     asserts each gets its own closures and identity. This is the
+ *     multi-codex capability the refactor exists to unlock.
+ *
+ *  2. **Many drivers, one registry** — the "all drivers slice" describe
+ *     block below configures one instance of every shipped driver
+ *     (`codex`, `claudeAgent`, `cursor`, `grok`, `opencode`, `pi`) in a
+ *     single `ProviderInstanceConfigMap` and asserts the registry boots
+ *     them all without cross-contamination. This proves the driver SPI is
+ *     uniform across every provider — any driver plugs into the registry
+ *     through the same `ProviderDriver` value contract.
+ *
+ * Every instance in these tests is configured with `enabled: false` so the
+ * provider-status checks short-circuit to pending/disabled snapshots
+ * without trying to spawn real `codex` / `claude` / `agent` / `grok` /
+ * `opencode` / `pi` binaries. That keeps the assertions focused on registry
+ * routing behaviour rather than the runtime details of each provider.
+ */
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -253,6 +277,18 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
 });
 
 describe("ProviderInstanceRegistryLive — all drivers slice", () => {
+  // All drivers need `NodeServices` (ChildProcessSpawner + FileSystem +
+  // Path). `OpenCodeDriver.create` and `PiDriver.create` additionally yield
+  // their own runtime services at construction time, so we wire
+  // `OpenCodeRuntimeLive` and `PiRuntimeLive` into the stack. Both bundle
+  // their own `NetService.layer` via `Layer.provide`, so the only external
+  // requirement they still expose is `ChildProcessSpawner` — resolved here
+  // by piping the merged layer through `provideMerge(NodeServices.layer)`.
+  //
+  // The nested `provideMerge`s read bottom-up: `NodeServices.layer`
+  // provides the runtime layers' deps while keeping its own outputs
+  // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
+  // `FileSystem` dep while keeping everything else surfaced to the test.
   const infraLayer = Layer.mergeAll(OpenCodeRuntimeLive, PiRuntimeLive).pipe(
     Layer.provideMerge(NodeServices.layer),
   );
@@ -337,6 +373,8 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         configMap,
       });
 
+      // Every configured instance must materialize — none downgraded to a
+      // shadow snapshot, because every driver in the map is registered.
       const unavailable = yield* registry.listUnavailable;
       expect(unavailable).toEqual([]);
 
@@ -346,6 +384,9 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
         [codexId, claudeId, cursorId, grokId, openCodeId, piId].toSorted(),
       );
 
+      // Instance lookup by id resolves each instance to its own bundle —
+      // this is how rest-of-server routes turn/session calls in the new
+      // model. Each driver's bundle carries its advertised `driverKind`.
       const codex = yield* registry.getInstance(codexId);
       const claude = yield* registry.getInstance(claudeId);
       const cursor = yield* registry.getInstance(cursorId);
@@ -365,6 +406,11 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       expect(openCode?.displayName).toBe("OpenCode");
       expect(pi?.displayName).toBe("Pi");
 
+      // Every instance owns its own set of closures — no sharing across
+      // drivers. `adapter` / `textGeneration` / `snapshot` are all
+      // distinct references even when two instances happen to share a
+      // trait (e.g. Cursor + others all use a stub-or-real
+      // `textGeneration`; they must still be different object values).
       const adapters = [
         codex!.adapter,
         claude!.adapter,
@@ -393,6 +439,12 @@ describe("ProviderInstanceRegistryLive — all drivers slice", () => {
       ];
       expect(new Set(snapshots).size).toBe(snapshots.length);
 
+      // Snapshots identify themselves by `instanceId` + `driver` so
+      // downstream aggregation in `ProviderRegistry` can tell instances
+      // apart even when two share a driver. With `enabled: false`, the
+      // check short-circuits and we get a disabled/pending snapshot back
+      // — that's enough signal to validate the stamping wrapper without
+      // spawning real binaries.
       const codexSnapshot = yield* codex!.snapshot.getSnapshot;
       expect(codexSnapshot.instanceId).toBe(codexId);
       expect(codexSnapshot.driver).toBe(codexDriverKind);
