@@ -131,16 +131,9 @@ export const buildInitialPiProviderSnapshot = (
 ): Effect.Effect<ServerProviderDraft> =>
   Effect.gen(function* () {
     const checkedAt = yield* Effect.map(DateTime.now, DateTime.formatIso);
-    const models = providerModelsFromSettings(
-      [],
-      PROVIDER,
-      piSettings.customModels,
-      DEFAULT_PI_MODEL_CAPABILITIES,
-    );
     return piSnapshot({
       piSettings,
       checkedAt,
-      models,
       probe: {
         installed: false,
         version: null,
@@ -160,7 +153,6 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const piRuntime = yield* PiRuntime;
   const resolvedEnvironment = environment ?? process.env;
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
-  const customModels = piSettings.customModels;
   const failureDetail = (cause: Cause.Cause<unknown>) => piRuntimeErrorDetail(Cause.squash(cause));
 
   const fallback = (detail: string, version: string | null = null) => {
@@ -247,7 +239,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const models = providerModelsFromSettings(
     discoveredModels,
     PROVIDER,
-    customModels,
+    piSettings.customModels,
     DEFAULT_PI_MODEL_CAPABILITIES,
   );
 
