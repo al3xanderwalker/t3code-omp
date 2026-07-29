@@ -35,7 +35,7 @@ jobs:
           }
 
       - name: Build unsigned Windows x64 installer
-        run: pnpm dist:desktop:win:x64
+        run: vp run dist:desktop:artifact --platform win --target nsis --arch x64 --verbose
 
       - uses: actions/upload-artifact@v7
         with:
