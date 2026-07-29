@@ -148,7 +148,7 @@ it.effect(
       const snapshot = yield* buildInitialPiProviderSnapshot(decodePiSettings({ enabled: false }));
       NodeAssert.equal(snapshot.enabled, false);
       NodeAssert.equal(snapshot.status, "disabled");
-      NodeAssert.equal(snapshot.badgeLabel, "Early Access");
+      NodeAssert.equal(snapshot.badgeLabel, "Local Harness");
       NodeAssert.match(snapshot.message ?? "", /disabled/);
     }),
 );
@@ -158,7 +158,7 @@ it.effect("buildInitialPiProviderSnapshot returns a pending snapshot by default"
     const snapshot = yield* buildInitialPiProviderSnapshot(decodePiSettings({}));
     NodeAssert.equal(snapshot.enabled, true);
     NodeAssert.equal(snapshot.status, "warning");
-    NodeAssert.equal(snapshot.badgeLabel, "Early Access");
+    NodeAssert.equal(snapshot.badgeLabel, "Local Harness");
     NodeAssert.match(snapshot.message ?? "", /not been checked/);
   }),
 );
@@ -197,7 +197,7 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.enabled, true);
       NodeAssert.equal(snapshot.installed, false);
       NodeAssert.equal(snapshot.status, "error");
-      NodeAssert.equal(snapshot.message, "Pi CLI (`pi`) is not installed or not on PATH.");
+      NodeAssert.equal(snapshot.message, "Oh My Pi CLI (`omp`) is not installed or not on PATH.");
     }),
   );
 
@@ -216,7 +216,7 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.version, "0.4.1");
       NodeAssert.equal(
         snapshot.message,
-        "Failed to execute Pi CLI health check: model list failed",
+        "Failed to execute Oh My Pi CLI health check: model list failed",
       );
       NodeAssert.deepEqual(
         runtimeMock.state.calls.map((call) => call.args),
@@ -247,7 +247,7 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.version, null);
       NodeAssert.equal(
         snapshot.message,
-        "Failed to execute Pi CLI health check: Unable to determine Pi version from `pi --version` output.",
+        "Failed to execute Oh My Pi CLI health check: Unable to determine Oh My Pi version from `omp --version` output.",
       );
       NodeAssert.deepEqual(
         runtimeMock.state.calls.map((call) => call.args),
@@ -265,7 +265,7 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
       NodeAssert.equal(snapshot.installed, true);
       NodeAssert.equal(snapshot.status, "ready");
       NodeAssert.equal(snapshot.version, "0.4.1");
-      NodeAssert.equal(snapshot.badgeLabel, "Early Access");
+      NodeAssert.equal(snapshot.badgeLabel, "Local Harness");
       NodeAssert.deepEqual(slugs, [
         "anthropic/claude-haiku-4-5",
         "anthropic/claude-sonnet-5",

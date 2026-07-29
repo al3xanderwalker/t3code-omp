@@ -267,6 +267,11 @@ export function parseAgentListCliOutput(stdout: string): ReadonlyArray<Agent> {
   return agents;
 }
 
+export interface ParsedOpenCodeModelSlug {
+  readonly providerID: string;
+  readonly modelID: string;
+}
+
 export function parseOpenCodeModelSlug(
   slug: string | null | undefined,
 ): ParsedOpenCodeModelSlug | null {

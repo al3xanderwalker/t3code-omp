@@ -407,11 +407,11 @@ export const PiSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed(true)),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
-    binaryPath: makeBinaryPathSetting("pi").pipe(
+    binaryPath: makeBinaryPathSetting("omp").pipe(
       Schema.annotateKey({
-        title: "Binary path",
-        description: "Path to the Pi CLI binary.",
-        providerSettingsForm: { placeholder: "pi", clearWhenEmpty: "omit" },
+        title: "OMP binary path",
+        description: "Path to the Oh My Pi CLI binary.",
+        providerSettingsForm: { placeholder: "omp", clearWhenEmpty: "omit" },
       }),
     ),
     customModels: Schema.Array(Schema.String).pipe(

@@ -130,6 +130,7 @@ interface PiSessionContext {
   toolSequence: number;
   compactionSequence: number;
   readonly fallbackToolCallIds: Map<string, Array<string>>;
+  readonly evalInputDetails: Map<string, string>;
   readonly stopped: Ref.Ref<boolean>;
   readonly sessionScope: Scope.Closeable;
 }
@@ -161,6 +162,13 @@ function toolDetailFromArgs(toolName: string, args: unknown): string | undefined
   if (!args || typeof args !== "object") return undefined;
   if (toolName === "bash" && "command" in args && typeof args.command === "string") {
     return args.command;
+  }
+  if (toolName === "eval" && "code" in args && typeof args.code === "string") {
+    const language =
+      "language" in args && typeof args.language === "string" ? args.language : undefined;
+    const title = "title" in args && typeof args.title === "string" ? args.title.trim() : "";
+    const label = [title, language].filter((value) => value).join(" · ");
+    return label ? `${label}\n${args.code}` : args.code;
   }
   if ("path" in args && typeof args.path === "string") return args.path;
   if ("file_path" in args && typeof args.file_path === "string") return args.file_path;
@@ -271,7 +279,7 @@ function dialogQuestion(uiRequestId: string, dialog: PiPendingDialog): UserInput
       : dialog.options.map((option) => ({ label: option, description: option }));
   return {
     id: uiRequestId,
-    header: "Pi",
+    header: "Oh My Pi",
     question: dialog.title,
     options,
     multiSelect: false,
@@ -358,7 +366,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "makeTempDirectoryScoped",
-            detail: "Failed to create Pi approval extension directory.",
+            detail: "Failed to create Oh My Pi approval extension directory.",
             cause,
           }),
       ),
@@ -370,7 +378,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "writeFileString",
-            detail: "Failed to write Pi approval extension.",
+            detail: "Failed to write Oh My Pi approval extension.",
             cause,
           }),
       ),
@@ -382,7 +390,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "crypto/randomUUIDv4",
-            detail: "Failed to generate Pi runtime identifier.",
+            detail: "Failed to generate Oh My Pi runtime identifier.",
             cause,
           }),
       ),
@@ -536,7 +544,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           type: "runtime.warning",
           payload: {
             message:
-              "Pi MCP bridge could not be configured; preview browser tools unavailable for this session",
+              "Oh My Pi MCP bridge could not be configured; preview browser tools unavailable for this session",
             detail: {
               providerSessionId: warning.bridge.providerSessionId,
               reason: warning.bridge.detail,
@@ -551,7 +559,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         type: "runtime.warning",
         payload: {
           message:
-            "Pi MCP bridge unavailable; run `pi install npm:pi-mcp-adapter` for preview browser support.",
+            "Oh My Pi MCP bridge unavailable; run `omp install npm:pi-mcp-adapter` for preview browser support.",
           detail: { reason: warning.detail },
         },
       });
@@ -587,7 +595,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       }
       const statsDataExit = decodePiSessionStatsExit(statsExit.value.data);
       if (Exit.isFailure(statsDataExit)) {
-        yield* Effect.logWarning("Dropped malformed Pi session stats response.");
+        yield* Effect.logWarning("Dropped malformed Oh My Pi session stats response.");
         return;
       }
       const usage = tokenUsageFromStats(statsDataExit.value);
@@ -618,9 +626,18 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           yield* emit({
             ...(yield* buildEventBase({ threadId, turnId, raw: event })),
             type: "runtime.warning",
-            payload: { message: event.message ?? "Pi extension error." },
+            payload: { message: event.message ?? "Oh My Pi extension error." },
           });
         }
+        return;
+      }
+      if (
+        method === "cancel" ||
+        method === "setStatus" ||
+        method === "setWidget" ||
+        method === "setTitle" ||
+        method === "set_editor_text"
+      ) {
         return;
       }
       if (
@@ -637,7 +654,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         yield* emit({
           ...(yield* buildEventBase({ threadId, turnId, raw: event })),
           type: "runtime.warning",
-          payload: { message: `Cancelled unsupported Pi extension ${method} dialog.` },
+          payload: { message: `Cancelled unsupported Oh My Pi extension ${method} dialog.` },
         });
         return;
       }
@@ -665,7 +682,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         yield* emit({
           ...(yield* buildEventBase({ threadId, turnId, raw: event })),
           type: "runtime.warning",
-          payload: { message: "Cancelled malformed Pi approval dialog." },
+          payload: { message: "Cancelled malformed Oh My Pi approval dialog." },
         });
         return;
       }
@@ -680,7 +697,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           ...(yield* buildEventBase({ threadId, turnId, raw: event })),
           type: "runtime.warning",
           payload: {
-            message: `Cancelled unsupported Pi extension ${method} dialog: ${title}`,
+            message: `Cancelled unsupported Oh My Pi extension ${method} dialog: ${title}`,
           },
         });
         return;
@@ -694,7 +711,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         title:
           title.length > 0
             ? `${title}${event.message ? `\n${event.message}` : ""}`
-            : "Pi extension request",
+            : "Oh My Pi extension request",
         options: rawOptions,
       };
       context.pendingDialogs.set(uiRequestId, dialog);
@@ -775,11 +792,25 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           const toolCallId = fallbackToolCallItemId(context, event, toolName);
           const isEnd = event.type === "tool_execution_end";
           const isError = isEnd && event.isError === true;
-          const detail = isEnd
+          const resultDetail = isEnd
             ? toolResultText(event.result)
             : event.type === "tool_execution_update"
               ? toolResultText(event.partialResult)
-              : toolDetailFromArgs(toolName, event.args);
+              : undefined;
+          const inputDetail =
+            event.type === "tool_execution_start"
+              ? toolDetailFromArgs(toolName, event.args)
+              : context.evalInputDetails.get(toolCallId);
+          if (toolName === "eval" && event.type === "tool_execution_start" && inputDetail) {
+            context.evalInputDetails.set(toolCallId, inputDetail);
+          }
+          if (toolName === "eval" && isEnd) {
+            context.evalInputDetails.delete(toolCallId);
+          }
+          const detail =
+            toolName === "eval" && inputDetail && resultDetail
+              ? `${inputDetail}\n\n${resultDetail}`
+              : (resultDetail ?? inputDetail);
           const payload = {
             itemType: toToolLifecycleItemType(toolName),
             status: isError
@@ -808,6 +839,76 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           break;
         }
 
+        case "subagent_lifecycle": {
+          const payload = event.payload;
+          const title = payload.description?.trim() || `${payload.agent} subagent`;
+          const status =
+            payload.status === "started"
+              ? ("inProgress" as const)
+              : payload.status === "completed"
+                ? ("completed" as const)
+                : payload.status === "failed"
+                  ? ("failed" as const)
+                  : ("declined" as const);
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId,
+              turnId,
+              itemId: `omp-subagent-${payload.id}`,
+              raw: event,
+            })),
+            type: payload.status === "started" ? "item.started" : "item.completed",
+            payload: {
+              itemType: "unknown",
+              status,
+              title,
+              detail: `Subagent ${payload.status}`,
+              data: payload,
+            },
+          });
+          break;
+        }
+
+        case "subagent_progress": {
+          const payload = event.payload;
+          const progress = payload.progress;
+          const title = progress.description?.trim() || `${payload.agent} subagent`;
+          const toolDetail = progress.currentTool?.trim()
+            ? `${progress.currentTool}${progress.currentToolArgs?.trim() ? `: ${progress.currentToolArgs}` : ""}`
+            : undefined;
+          const detail =
+            toolDetail ||
+            progress.lastIntent?.trim() ||
+            payload.assignment?.trim() ||
+            payload.task.trim() ||
+            undefined;
+          const status =
+            progress.status === "completed"
+              ? ("completed" as const)
+              : progress.status === "failed"
+                ? ("failed" as const)
+                : progress.status === "aborted"
+                  ? ("declined" as const)
+                  : ("inProgress" as const);
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId,
+              turnId,
+              itemId: `omp-subagent-${progress.id}`,
+              raw: event,
+            })),
+            type: "item.updated",
+            payload: {
+              itemType: "unknown",
+              status,
+              title,
+              ...(detail ? { detail } : {}),
+              data: payload,
+            },
+          });
+          break;
+        }
+
         case "agent_end": {
           const endedTurnId = context.activeTurnId;
           if (!endedTurnId) break;
@@ -823,7 +924,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             ...(yield* buildEventBase({ threadId, turnId: endedTurnId })),
             type: "turn.completed",
             payload: failed
-              ? { state: "failed", errorMessage: "Pi reported an error while completing the turn." }
+              ? {
+                  state: "failed",
+                  errorMessage: "Oh My Pi reported an error while completing the turn.",
+                }
               : { state: "completed" },
           });
           yield* emitTokenUsage(context);
@@ -877,7 +981,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             ...(yield* buildEventBase({ threadId, turnId, raw: event })),
             type: "runtime.warning",
             payload: {
-              message: `Pi is retrying after a transient provider error (attempt ${String(event.attempt ?? "?")}).`,
+              message: `Oh My Pi is retrying after a transient provider error (attempt ${String(event.attempt ?? "?")}).`,
               detail: event,
             },
           });
@@ -889,7 +993,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             ...(yield* buildEventBase({ threadId, turnId, raw: event })),
             type: "runtime.warning",
             payload: {
-              message: `Pi extension error: ${event.error ?? "unknown"}`,
+              message: `Oh My Pi extension error: ${event.error ?? "unknown"}`,
               detail: event,
             },
           });
@@ -936,6 +1040,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
     const startSession: PiAdapterShape["startSession"] = Effect.fn("startSession")(
       function* (input) {
         const directory = input.cwd ?? serverConfig.cwd;
+        const sessionName = `T3 Code ${input.threadId}`;
         const existing = sessions.get(input.threadId);
         if (existing) {
           yield* stopPiContext(existing);
@@ -962,7 +1067,6 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             cwd: directory,
             ...(spawnEnvironment ? { environment: spawnEnvironment } : {}),
             runtimeMode: input.runtimeMode,
-            sessionName: `T3 Code ${input.threadId}`,
             ...(input.modelSelection ? { modelSlug: input.modelSelection.model } : {}),
             ...(thinkingLevel ? { thinkingLevel } : {}),
             approvalExtensionPath,
@@ -983,7 +1087,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             const startedExit = yield* Effect.exit(
               Effect.gen(function* () {
                 rpc = yield* piRuntime.spawnSession(spawnInput(bridgeEnabled));
-                const state = yield* rpc.request({ type: "get_state" }, { timeoutMs: 20_000 });
+                const state = yield* rpc.request({ type: "get_state" }, { timeoutMs: 60_000 });
                 const stateDataExit = decodePiStateResponseDataExit(state.data);
                 if (Exit.isFailure(stateDataExit)) {
                   return yield* new PiRuntimeError({
@@ -991,6 +1095,14 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                     detail: "Pi returned malformed state data.",
                   });
                 }
+                yield* rpc.request(
+                  { type: "set_session_name", name: sessionName },
+                  { timeoutMs: 10_000 },
+                );
+                yield* rpc.request(
+                  { type: "set_subagent_subscription", level: "progress" },
+                  { timeoutMs: 10_000 },
+                );
                 return {
                   sessionScope,
                   rpc,
@@ -1086,6 +1198,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           toolSequence: 0,
           compactionSequence: 0,
           fallbackToolCallIds: new Map(),
+          evalInputDetails: new Map(),
           stopped,
           sessionScope: started.sessionScope,
         };

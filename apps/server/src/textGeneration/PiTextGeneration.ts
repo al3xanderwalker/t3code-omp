@@ -44,7 +44,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
     if (!parsedModel) {
       return yield* new TextGenerationError({
         operation: input.operation,
-        detail: "Pi model selection must use the 'provider/model' format.",
+        detail: "Oh My Pi model selection must use the 'provider/model' format.",
       });
     }
 
@@ -87,14 +87,16 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
       return yield* new TextGenerationError({
         operation: input.operation,
         detail:
-          result.stderr.trim() || result.stdout.trim() || `Pi exited with code ${result.code}.`,
+          result.stderr.trim() ||
+          result.stdout.trim() ||
+          `Oh My Pi exited with code ${result.code}.`,
       });
     }
     const rawText = result.stdout.trim();
     if (rawText.length === 0) {
       return yield* new TextGenerationError({
         operation: input.operation,
-        detail: "Pi returned empty output.",
+        detail: "Oh My Pi returned empty output.",
       });
     }
 
@@ -105,7 +107,7 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
           Effect.fail(
             new TextGenerationError({
               operation: input.operation,
-              detail: "Pi returned invalid structured output.",
+              detail: "Oh My Pi returned invalid structured output.",
               cause,
             }),
           ),

@@ -134,7 +134,7 @@ describe("spawnPiRpcSession", () => {
 
         const error = yield* Fiber.join(requestFiber);
 
-        expect(error.detail).toBe("Pi command 'do_work' failed.");
+        expect(error.detail).toBe("Oh My Pi command 'do_work' failed.");
       }),
     ),
   );
@@ -150,7 +150,7 @@ describe("spawnPiRpcSession", () => {
 
         const error = yield* handle.request({ type: "bigint", value: 1n }).pipe(Effect.flip);
 
-        expect(error.detail).toBe("Failed to encode Pi RPC command 'bigint' as JSON.");
+        expect(error.detail).toBe("Failed to encode Oh My Pi RPC command 'bigint' as JSON.");
       }),
     ),
   );
@@ -171,7 +171,60 @@ describe("spawnPiRpcSession", () => {
 
         const error = yield* Fiber.join(requestFiber);
 
-        expect(error.detail).toBe("Pi RPC process exited before replying (exit code 7).");
+        expect(error.detail).toBe("Oh My Pi RPC process exited before replying (exit code 7).");
+      }),
+    ),
+  );
+  it.effect("decodes Oh My Pi subagent progress frames", () =>
+    spawnWithFakeProcess(({ stdout }) =>
+      Effect.gen(function* () {
+        const handle = yield* spawnPiRpcSession({
+          binaryPath: "omp",
+          cwd: process.cwd(),
+          runtimeMode: "full-access",
+        });
+        yield* Queue.offer(
+          stdout,
+          responseLine({
+            type: "subagent_progress",
+            payload: {
+              index: 0,
+              agent: "scout",
+              task: "Inspect the repository",
+              progress: {
+                id: "agent-1",
+                status: "running",
+                currentTool: "read",
+                currentToolArgs: "src",
+                toolCount: 1,
+                requests: 1,
+                tokens: 100,
+                durationMs: 250,
+              },
+            },
+          }),
+        );
+
+        const event = yield* Queue.take(handle.events);
+
+        expect(event).toEqual({
+          type: "subagent_progress",
+          payload: {
+            index: 0,
+            agent: "scout",
+            task: "Inspect the repository",
+            progress: {
+              id: "agent-1",
+              status: "running",
+              currentTool: "read",
+              currentToolArgs: "src",
+              toolCount: 1,
+              requests: 1,
+              tokens: 100,
+              durationMs: 250,
+            },
+          },
+        });
       }),
     ),
   );

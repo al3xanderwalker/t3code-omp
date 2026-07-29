@@ -255,6 +255,44 @@ const ToolExecutionEvent = Schema.Struct({
   isError: Schema.optionalKey(Schema.Boolean),
 });
 
+const SubagentLifecycleEvent = Schema.Struct({
+  type: Schema.Literal("subagent_lifecycle"),
+  payload: Schema.Struct({
+    id: Schema.String,
+    agent: Schema.String,
+    description: Schema.optionalKey(Schema.String),
+    status: Schema.Literals(["started", "completed", "failed", "aborted"]),
+    index: Schema.Number,
+    parentToolCallId: Schema.optionalKey(Schema.String),
+    detached: Schema.optionalKey(Schema.Boolean),
+  }),
+});
+
+const SubagentProgressEvent = Schema.Struct({
+  type: Schema.Literal("subagent_progress"),
+  payload: Schema.Struct({
+    index: Schema.Number,
+    agent: Schema.String,
+    task: Schema.String,
+    assignment: Schema.optionalKey(Schema.String),
+    parentToolCallId: Schema.optionalKey(Schema.String),
+    detached: Schema.optionalKey(Schema.Boolean),
+    progress: Schema.Struct({
+      id: Schema.String,
+      status: Schema.Literals(["pending", "running", "completed", "failed", "aborted"]),
+      description: Schema.optionalKey(Schema.String),
+      lastIntent: Schema.optionalKey(Schema.String),
+      currentTool: Schema.optionalKey(Schema.String),
+      currentToolArgs: Schema.optionalKey(Schema.String),
+      toolCount: Schema.Number,
+      requests: Schema.Number,
+      tokens: Schema.Number,
+      durationMs: Schema.Number,
+      resolvedModel: Schema.optionalKey(Schema.String),
+    }),
+  }),
+});
+
 const AgentEndEvent = Schema.Struct({
   type: Schema.Literal("agent_end"),
 });
@@ -293,6 +331,8 @@ export const PiRpcEvent = Schema.Union([
   MessageUpdateEvent,
   MessageEndEvent,
   ToolExecutionEvent,
+  SubagentLifecycleEvent,
+  SubagentProgressEvent,
   AgentEndEvent,
   ExtensionUiRequestEvent,
   CompactionStartEvent,
@@ -341,7 +381,6 @@ export interface SpawnPiRpcInput {
   readonly cwd: string;
   readonly environment?: NodeJS.ProcessEnv;
   readonly runtimeMode: RuntimeMode;
-  readonly sessionName?: string;
   readonly modelSlug?: string;
   readonly thinkingLevel?: string;
   readonly approvalExtensionPath?: string;
@@ -370,7 +409,6 @@ export const spawnPiRpcSession = (
       ...(input.noTools ? ["--no-tools"] : []),
       ...(input.mcpConfigPath ? ["--mcp-config", input.mcpConfigPath] : []),
       ...(input.appendSystemPrompt ? ["--append-system-prompt", input.appendSystemPrompt] : []),
-      ...(input.sessionName ? ["--name", input.sessionName] : []),
       ...(parsedModel ? ["--provider", parsedModel.provider, "--model", parsedModel.modelId] : []),
       ...(input.thinkingLevel ? ["--thinking", input.thinkingLevel] : []),
       ...(input.approvalExtensionPath && input.runtimeMode !== "full-access"
@@ -388,7 +426,7 @@ export const spawnPiRpcSession = (
         (cause) =>
           new PiRuntimeError({
             operation: "spawnPiRpcSession",
-            detail: `Failed to resolve Pi spawn command: ${piRuntimeErrorDetail(cause)}`,
+            detail: `Failed to resolve Oh My Pi spawn command: ${piRuntimeErrorDetail(cause)}`,
             cause,
           }),
       ),
@@ -419,7 +457,7 @@ export const spawnPiRpcSession = (
           (cause) =>
             new PiRuntimeError({
               operation: "spawnPiRpcSession",
-              detail: `Failed to spawn Pi RPC process: ${piRuntimeErrorDetail(cause)}`,
+              detail: `Failed to spawn Oh My Pi RPC process: ${piRuntimeErrorDetail(cause)}`,
               cause,
             }),
         ),
@@ -446,7 +484,7 @@ export const spawnPiRpcSession = (
     yield* Scope.addFinalizer(
       scope,
       Effect.gen(function* () {
-        yield* failPending("Pi RPC session closed.");
+        yield* failPending("Oh My Pi RPC session closed.");
         yield* Queue.shutdown(stdinQueue);
         yield* Queue.shutdown(events);
       }),
@@ -458,20 +496,20 @@ export const spawnPiRpcSession = (
         if (trimmed.length === 0) return;
         const decoded = decodeJsonStringExit(trimmed);
         if (Exit.isFailure(decoded)) {
-          yield* Effect.logWarning("Dropped malformed Pi RPC JSON line.");
+          yield* Effect.logWarning("Dropped malformed Oh My Pi RPC JSON line.");
           return;
         }
         const parsed = decoded.value;
         const parsedType =
           parsed && typeof parsed === "object" && "type" in parsed ? parsed.type : undefined;
         if (typeof parsedType !== "string") {
-          yield* Effect.logWarning("Dropped malformed Pi RPC line without a string type.");
+          yield* Effect.logWarning("Dropped malformed Oh My Pi RPC line without a string type.");
           return;
         }
         if (parsedType === "response") {
           const responseExit = decodePiRpcResponseWithIdExit(parsed);
           if (Exit.isFailure(responseExit)) {
-            yield* Effect.logWarning("Dropped malformed Pi RPC response.");
+            yield* Effect.logWarning("Dropped malformed Oh My Pi RPC response.");
             return;
           }
           const response = responseExit.value;
@@ -484,7 +522,7 @@ export const spawnPiRpcSession = (
         }
         const eventExit = decodePiRpcEventExit(parsed);
         if (Exit.isFailure(eventExit)) {
-          yield* Effect.logWarning(`Dropped unsupported Pi RPC event '${parsedType}'.`);
+          yield* Effect.logWarning(`Dropped unsupported Oh My Pi RPC event '${parsedType}'.`);
           return;
         }
         yield* Queue.offer(events, eventExit.value).pipe(Effect.ignore);
@@ -516,7 +554,7 @@ export const spawnPiRpcSession = (
 
     yield* exitCode.pipe(
       Effect.flatMap((code) =>
-        failPending(`Pi RPC process exited before replying (exit code ${code}).`),
+        failPending(`Oh My Pi RPC process exited before replying (exit code ${code}).`),
       ),
       Effect.ensuring(Queue.shutdown(events).pipe(Effect.ignore)),
       Effect.forkIn(scope),
@@ -531,7 +569,7 @@ export const spawnPiRpcSession = (
         if (Exit.isFailure(encodedExit)) {
           return yield* new PiRuntimeError({
             operation: commandType,
-            detail: `Failed to encode Pi RPC command '${commandType}' as JSON.`,
+            detail: `Failed to encode Oh My Pi RPC command '${commandType}' as JSON.`,
             cause: encodedExit.cause,
           });
         }
@@ -560,7 +598,7 @@ export const spawnPiRpcSession = (
               Effect.fail(
                 new PiRuntimeError({
                   operation: commandType,
-                  detail: `Timed out waiting for Pi response to '${commandType}'.`,
+                  detail: `Timed out waiting for Oh My Pi response to '${commandType}'.`,
                 }),
               ),
           }),
@@ -569,7 +607,10 @@ export const spawnPiRpcSession = (
         if (!response.success) {
           return yield* new PiRuntimeError({
             operation: commandType,
-            detail: nonEmptyDetail(response.error, `Pi command '${response.command}' failed.`),
+            detail: nonEmptyDetail(
+              response.error,
+              `Oh My Pi command '${response.command}' failed.`,
+            ),
           });
         }
         return response;
@@ -580,7 +621,7 @@ export const spawnPiRpcSession = (
       Effect.gen(function* () {
         const encodedExit = encodeJsonLineExit(payload);
         if (Exit.isFailure(encodedExit)) {
-          yield* Effect.logWarning("Dropped non-JSON-encodable Pi RPC notification.");
+          yield* Effect.logWarning("Dropped non-JSON-encodable Oh My Pi RPC notification.");
           return;
         }
         yield* Queue.offer(stdinQueue, `${encodedExit.value}\n`);

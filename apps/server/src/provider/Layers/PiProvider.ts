@@ -29,8 +29,8 @@ import {
 
 const PROVIDER = ProviderDriverKind.make("pi");
 const PI_PRESENTATION = {
-  displayName: "Pi",
-  badgeLabel: "Early Access",
+  displayName: "Oh My Pi",
+  badgeLabel: "Local Harness",
   showInteractionModeToggle: false,
 } as const;
 
@@ -38,7 +38,7 @@ const DEFAULT_PI_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities
   optionDescriptors: [],
 });
 
-const PI_MODEL_DISCOVERY_TIMEOUT_MS = 15_000;
+const PI_MODEL_DISCOVERY_TIMEOUT_MS = 60_000;
 const PI_CODEX_THINKING_LEVELS = [...PI_THINKING_LEVELS, "xhigh"] as const;
 
 function thinkingLabel(level: string): string {
@@ -96,12 +96,12 @@ function formatPiProbeError(detail: string): { installed: boolean; message: stri
   if (lower.includes("enoent") || lower.includes("notfound") || lower.includes("not found")) {
     return {
       installed: false,
-      message: "Pi CLI (`pi`) is not installed or not on PATH.",
+      message: "Oh My Pi CLI (`omp`) is not installed or not on PATH.",
     };
   }
   return {
     installed: true,
-    message: `Failed to execute Pi CLI health check: ${detail}`,
+    message: `Failed to execute Oh My Pi CLI health check: ${detail}`,
   };
 }
 
@@ -117,12 +117,7 @@ const piSnapshot = (input: {
     checkedAt: input.checkedAt,
     models:
       input.models ??
-      providerModelsFromSettings(
-        [],
-        PROVIDER,
-        input.piSettings.customModels,
-        DEFAULT_PI_MODEL_CAPABILITIES,
-      ),
+      providerModelsFromSettings([], input.piSettings.customModels, DEFAULT_PI_MODEL_CAPABILITIES),
     probe: input.probe,
   });
 
@@ -140,8 +135,8 @@ export const buildInitialPiProviderSnapshot = (
         status: "warning",
         auth: { status: "unknown" },
         message: piSettings.enabled
-          ? "Pi provider status has not been checked in this session yet."
-          : "Pi is disabled in T3 Code settings.",
+          ? "Oh My Pi provider status has not been checked in this session yet."
+          : "Oh My Pi is disabled in T3 Code settings.",
       },
     });
   });
@@ -179,7 +174,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
         version: null,
         status: "warning",
         auth: { status: "unknown" },
-        message: "Pi is disabled in T3 Code settings.",
+        message: "Oh My Pi is disabled in T3 Code settings.",
       },
     });
   }
@@ -193,13 +188,13 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   );
   if (versionExit._tag === "Failure") {
     const detail = failureDetail(versionExit.cause);
-    yield* Effect.logWarning(`Pi provider version probe failed: ${detail}`);
+    yield* Effect.logWarning(`Oh My Pi provider version probe failed: ${detail}`);
     return fallback(detail);
   }
   const version = parseGenericCliVersion(versionExit.value.stdout);
   if (!version) {
-    yield* Effect.logWarning("Pi provider version probe returned unparseable output.");
-    return fallback("Unable to determine Pi version from `pi --version` output.");
+    yield* Effect.logWarning("Oh My Pi provider version probe returned unparseable output.");
+    return fallback("Unable to determine Oh My Pi version from `omp --version` output.");
   }
 
   const modelsExit = yield* Effect.exit(
@@ -230,7 +225,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   );
   if (modelsExit._tag === "Failure") {
     const detail = failureDetail(modelsExit.cause);
-    yield* Effect.logWarning(`Pi provider model probe failed: ${detail}`);
+    yield* Effect.logWarning(`Oh My Pi provider model probe failed: ${detail}`);
     return fallback(detail, version);
   }
 
@@ -238,7 +233,6 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
   const discoveredModels = toServerProviderModels(piModels);
   const models = providerModelsFromSettings(
     discoveredModels,
-    PROVIDER,
     piSettings.customModels,
     DEFAULT_PI_MODEL_CAPABILITIES,
   );
@@ -253,12 +247,12 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       status: discoveredModels.length > 0 ? "ready" : "warning",
       auth: {
         status: discoveredModels.length > 0 ? "authenticated" : "unknown",
-        type: "pi",
+        type: "oh-my-pi",
       },
       message:
         discoveredModels.length > 0
-          ? `Pi reports ${discoveredModels.length} models across its configured providers.`
-          : "Pi is available, but Pi reported no models.",
+          ? `Oh My Pi reports ${discoveredModels.length} models across its configured providers.`
+          : "Oh My Pi is available, but reported no models.",
     },
   });
 });

@@ -8,6 +8,7 @@ import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { makePiTextGeneration } from "../../textGeneration/PiTextGeneration.ts";
@@ -24,7 +25,8 @@ import {
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
-  makePackageManagedProviderMaintenanceResolver,
+  makeProviderMaintenanceCapabilities,
+  type ProviderMaintenanceCapabilitiesResolver,
   resolveProviderMaintenanceCapabilitiesEffect,
 } from "../providerMaintenance.ts";
 import { PiRuntime } from "../piRuntime.ts";
@@ -40,14 +42,19 @@ const decodePiSettings = Schema.decodeSync(PiSettings);
 const DRIVER_KIND = ProviderDriverKind.make("pi");
 const SNAPSHOT_REFRESH_INTERVAL = Duration.minutes(5);
 
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: DRIVER_KIND,
-  npmPackageName: "@earendil-works/pi-coding-agent",
-  homebrewFormula: null,
-  nativeUpdate: null,
-});
+const UPDATE: ProviderMaintenanceCapabilitiesResolver = {
+  resolve: (options) =>
+    makeProviderMaintenanceCapabilities({
+      provider: DRIVER_KIND,
+      packageName: null,
+      updateExecutable: options?.binaryPath?.trim() || "omp",
+      updateArgs: ["update"],
+      updateLockKey: "omp",
+    }),
+};
 
 export type PiDriverEnv =
+  | BackgroundPolicy.BackgroundPolicy
   | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem
@@ -77,7 +84,7 @@ const withInstanceIdentity =
 export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
   driverKind: DRIVER_KIND,
   metadata: {
-    displayName: "Pi",
+    displayName: "Oh My Pi",
     supportsMultipleInstances: true,
   },
   configSchema: PiSettings,
@@ -115,7 +122,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: `Failed to create Pi adapter: ${cause.message ?? String(cause)}`,
+              detail: `Failed to create Oh My Pi adapter: ${cause.message ?? String(cause)}`,
               cause,
             }),
         ),
@@ -150,7 +157,7 @@ export const PiDriver: ProviderDriver<PiSettings, PiDriverEnv> = {
             new ProviderDriverError({
               driver: DRIVER_KIND,
               instanceId,
-              detail: `Failed to build Pi snapshot: ${cause.message ?? String(cause)}`,
+              detail: `Failed to build Oh My Pi snapshot: ${cause.message ?? String(cause)}`,
               cause,
             }),
         ),

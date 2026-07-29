@@ -53,7 +53,7 @@ export const PROVIDER_OPTIONS: Array<{
   },
   {
     value: ProviderDriverKind.make("pi"),
-    label: "Pi",
+    label: "Oh My Pi",
     available: true,
     pickerSidebarBadge: "new",
   },

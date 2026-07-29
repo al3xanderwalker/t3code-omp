@@ -260,6 +260,8 @@ export function normalizeCustomModelSlug(model: string | null | undefined): stri
   }
 
   return model.trim() || null;
+}
+
 export function parseProviderModelSlug(slug: string | null | undefined): ProviderModelSlug | null {
   if (typeof slug !== "string") return null;
   const trimmed = slug.trim();

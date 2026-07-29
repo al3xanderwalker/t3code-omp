@@ -159,7 +159,10 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           body: "Covers provider and adapter flows.",
         });
         NodeAssert.equal(runtimeMock.state.calls.length, 1);
-        NodeAssert.match(String(runtimeMock.state.calls[0]?.stdin), /GitHub pull request content/);
+        NodeAssert.match(
+          String(runtimeMock.state.calls[0]?.stdin),
+          /source control change request content/,
+        );
       }),
     ),
   );
@@ -236,7 +239,10 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           .pipe(Effect.flip);
 
         NodeAssert.ok(isTextGenerationError(error));
-        NodeAssert.equal(error.detail, "Pi model selection must use the 'provider/model' format.");
+        NodeAssert.equal(
+          error.detail,
+          "Oh My Pi model selection must use the 'provider/model' format.",
+        );
       }),
     ),
   );
@@ -259,7 +265,7 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           .pipe(Effect.flip);
 
         NodeAssert.ok(isTextGenerationError(error));
-        NodeAssert.equal(error.detail, "Pi returned invalid structured output.");
+        NodeAssert.equal(error.detail, "Oh My Pi returned invalid structured output.");
       }),
     ),
   );
@@ -282,7 +288,7 @@ it.layer(PiTextGenerationTestLayer)("PiTextGeneration", (it) => {
           .pipe(Effect.flip);
 
         NodeAssert.ok(isTextGenerationError(error));
-        NodeAssert.equal(error.detail, "Pi returned empty output.");
+        NodeAssert.equal(error.detail, "Oh My Pi returned empty output.");
       }),
     ),
   );

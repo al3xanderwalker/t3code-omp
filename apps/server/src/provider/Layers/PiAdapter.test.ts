@@ -60,7 +60,7 @@ const runtimeMock = {
     handles: [] as Array<FakePiHandle>,
     requests: [] as Array<Record<string, unknown>>,
     notifications: [] as Array<Record<string, unknown>>,
-    closeCalls: [] as Array<string | undefined>,
+    closeCalls: [] as Array<string>,
     beforeGetStateResponse: [] as Array<Effect.Effect<void>>,
     spawnSignals: [] as Array<Deferred.Deferred<void>>,
     spawnFailures: [] as Array<PiRuntimeError | null | undefined>,
@@ -194,7 +194,7 @@ const PiRuntimeTestDouble: PiRuntimeShape = {
       }
       yield* Effect.addFinalizer(() =>
         Effect.sync(() => {
-          runtimeMock.state.closeCalls.push(input.sessionName);
+          runtimeMock.state.closeCalls.push(input.binaryPath);
         }),
       );
       return handle;
@@ -256,12 +256,21 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.equal(runtimeMock.state.spawnInputs[0]?.binaryPath, "fake-pi");
       NodeAssert.equal(runtimeMock.state.spawnInputs[0]?.mcpConfigPath, undefined);
       NodeAssert.equal(runtimeMock.state.spawnInputs[0]?.appendSystemPrompt, undefined);
-      NodeAssert.deepEqual(runtimeMock.state.requests.map(commandType), ["get_state", "abort"]);
+      NodeAssert.deepEqual(runtimeMock.state.requests.map(commandType), [
+        "get_state",
+        "set_session_name",
+        "set_subagent_subscription",
+        "abort",
+      ]);
+      NodeAssert.deepEqual(runtimeMock.state.requests[1], {
+        type: "set_session_name",
+        name: `T3 Code ${threadId}`,
+      });
       NodeAssert.deepEqual(
         events.map((event) => event.type),
         ["session.started", "thread.started", "session.exited"],
       );
-      NodeAssert.deepEqual(runtimeMock.state.closeCalls, [`T3 Code ${threadId}`]);
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["fake-pi"]);
     }),
   );
 
@@ -285,7 +294,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.equal(sessions.length, 1);
       NodeAssert.equal(sessions[0], secondSession);
       NodeAssert.equal(runtimeMock.state.handles.length, 2);
-      NodeAssert.deepEqual(runtimeMock.state.closeCalls, [`T3 Code ${threadId}`]);
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["fake-pi"]);
     }),
   );
 
@@ -301,7 +310,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.equal(error._tag, "ProviderAdapterProcessError");
       NodeAssert.match(error.detail, /Pi returned malformed state data/);
       NodeAssert.match(error.detail, /stderr: startup crash detail/);
-      NodeAssert.deepEqual(runtimeMock.state.closeCalls, [`T3 Code ${threadId}`]);
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["fake-pi"]);
     }),
   );
 
@@ -361,7 +370,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       const warningPayload = events.at(-1)?.payload as { readonly message?: string } | undefined;
       NodeAssert.equal(
         warningPayload?.message,
-        "Pi MCP bridge could not be configured; preview browser tools unavailable for this session",
+        "Oh My Pi MCP bridge could not be configured; preview browser tools unavailable for this session",
       );
       yield* adapter.stopSession(threadId);
       yield* fs
@@ -403,7 +412,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         ["session.started", "thread.started", "runtime.warning"],
       );
       const warningPayload = events.at(-1)?.payload as { readonly message?: string } | undefined;
-      NodeAssert.match(String(warningPayload?.message ?? ""), /pi install npm:pi-mcp-adapter/);
+      NodeAssert.match(String(warningPayload?.message ?? ""), /omp install npm:pi-mcp-adapter/);
       yield* adapter.stopSession(threadId);
     }),
   );
@@ -440,7 +449,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         exitKind: "error",
       });
       NodeAssert.equal(yield* adapter.hasSession(threadId), false);
-      NodeAssert.deepEqual(runtimeMock.state.closeCalls, [`T3 Code ${threadId}`]);
+      NodeAssert.deepEqual(runtimeMock.state.closeCalls, ["fake-pi"]);
     }),
   );
 
@@ -469,6 +478,8 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.equal(String(steered.turnId), String(turn.turnId));
       NodeAssert.deepEqual(runtimeMock.state.requests.map(commandType), [
         "get_state",
+        "set_session_name",
+        "set_subagent_subscription",
         "set_model",
         "set_thinking_level",
         "prompt",
@@ -573,6 +584,8 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       // needs to re-apply the thinking level.
       NodeAssert.deepEqual(runtimeMock.state.requests.map(commandType), [
         "get_state",
+        "set_session_name",
+        "set_subagent_subscription",
         "set_model",
         "set_thinking_level",
         "set_thinking_level",
@@ -653,6 +666,141 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
       NodeAssert.deepEqual(runtimeMock.state.notifications, [
         { type: "extension_ui_response", id: "approval-1", value: "allow" },
       ]);
+    }),
+  );
+
+  it.effect("surfaces Oh My Pi subagent lifecycle and progress", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-omp-subagents");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(6),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* startPiSession(adapter, threadId);
+      yield* adapter.sendTurn({ threadId, input: "Delegate the investigation" });
+      const handle = runtimeMock.state.handles[0];
+      if (!handle) throw new Error("missing fake Oh My Pi handle");
+
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "subagent_lifecycle",
+        payload: {
+          id: "agent-1",
+          agent: "scout",
+          description: "Repo scout",
+          status: "started",
+          index: 0,
+        },
+      });
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "subagent_progress",
+        payload: {
+          index: 0,
+          agent: "scout",
+          task: "Inspect the repository",
+          progress: {
+            id: "agent-1",
+            status: "running",
+            currentTool: "read",
+            currentToolArgs: "src",
+            toolCount: 1,
+            requests: 1,
+            tokens: 100,
+            durationMs: 250,
+          },
+        },
+      });
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "subagent_lifecycle",
+        payload: {
+          id: "agent-1",
+          agent: "scout",
+          description: "Repo scout",
+          status: "completed",
+          index: 0,
+        },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepEqual(
+        events.slice(3).map((event) => ({
+          type: event.type,
+          itemId: event.itemId,
+          status: "status" in event.payload ? event.payload.status : undefined,
+          detail: "detail" in event.payload ? event.payload.detail : undefined,
+        })),
+        [
+          {
+            type: "item.started",
+            itemId: "omp-subagent-agent-1",
+            status: "inProgress",
+            detail: "Subagent started",
+          },
+          {
+            type: "item.updated",
+            itemId: "omp-subagent-agent-1",
+            status: "inProgress",
+            detail: "read: src",
+          },
+          {
+            type: "item.completed",
+            itemId: "omp-subagent-agent-1",
+            status: "completed",
+            detail: "Subagent completed",
+          },
+        ],
+      );
+    }),
+  );
+
+  it.effect("surfaces Eval cell metadata and source", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-eval-input");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* startPiSession(adapter, threadId);
+      yield* adapter.sendTurn({ threadId, input: "Run the analysis" });
+      const handle = runtimeMock.state.handles[0];
+      if (!handle) throw new Error("missing fake Pi handle");
+
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "tool_execution_start",
+        toolCallId: "eval-1",
+        toolName: "eval",
+        args: {
+          language: "js",
+          title: "Count Rust files",
+          code: "const files = [...new Bun.Glob('**/*.rs').scanSync()];\ndisplay(files.length);",
+        },
+      });
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "tool_execution_end",
+        toolCallId: "eval-1",
+        toolName: "eval",
+        result: { content: [{ type: "text", text: "54" }] },
+      });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      const toolEvents = events.slice(-2);
+      NodeAssert.deepEqual(
+        toolEvents.map((event) => event.type),
+        ["item.started", "item.completed"],
+      );
+      NodeAssert.equal(
+        (toolEvents[0]?.payload as { detail?: string } | undefined)?.detail,
+        "Count Rust files · js\nconst files = [...new Bun.Glob('**/*.rs').scanSync()];\ndisplay(files.length);",
+      );
+      NodeAssert.equal(
+        (toolEvents[1]?.payload as { detail?: string } | undefined)?.detail,
+        "Count Rust files · js\nconst files = [...new Bun.Glob('**/*.rs').scanSync()];\ndisplay(files.length);\n\n54",
+      );
     }),
   );
 
@@ -783,7 +931,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         questions: [
           {
             id: "select-1",
-            header: "Pi",
+            header: "Oh My Pi",
             question: "Choose deployment target",
             options: [
               { label: "Staging", description: "Staging" },
@@ -797,7 +945,7 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         questions: [
           {
             id: "confirm-1",
-            header: "Pi",
+            header: "Oh My Pi",
             question: "Continue?",
             options: [
               { label: "Yes", description: "Confirm" },
@@ -851,11 +999,31 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         { type: "extension_ui_response", id: "editor-1", cancelled: true },
       ]);
       NodeAssert.deepEqual(events[2]?.payload, {
-        message: "Cancelled unsupported Pi extension input dialog: Enter a token",
+        message: "Cancelled unsupported Oh My Pi extension input dialog: Enter a token",
       });
       NodeAssert.deepEqual(events[3]?.payload, {
-        message: "Cancelled unsupported Pi extension editor dialog: Edit generated config",
+        message: "Cancelled unsupported Oh My Pi extension editor dialog: Edit generated config",
       });
+    }),
+  );
+
+  it.effect("ignores fire-and-forget Pi UI updates", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-ui-update");
+      yield* startPiSession(adapter, threadId);
+      const handle = runtimeMock.state.handles[0]!;
+
+      yield* Queue.offer(handle.eventsQueue, {
+        type: "extension_ui_request",
+        id: "widget-1",
+        method: "setWidget",
+        widgetKey: "status",
+        widgetLines: ["Ready"],
+      });
+      yield* Effect.yieldNow;
+
+      NodeAssert.deepEqual(runtimeMock.state.notifications, []);
     }),
   );
 
