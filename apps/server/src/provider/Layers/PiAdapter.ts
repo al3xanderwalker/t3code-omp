@@ -785,6 +785,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           break;
         }
 
+        case "command_output":
+          break;
+
+        case "available_commands_update":
+          break;
+
         case "tool_execution_start":
         case "tool_execution_update":
         case "tool_execution_end": {
@@ -1321,7 +1327,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         });
       }
 
-      yield* context.rpc
+      const promptResponse = yield* context.rpc
         .request({
           type: "prompt",
           message: text ?? "",
@@ -1349,6 +1355,41 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
                 }),
           ),
         );
+
+      const responseData =
+        promptResponse.data && typeof promptResponse.data === "object"
+          ? (promptResponse.data as Record<string, unknown>)
+          : undefined;
+      if (steeringTurnId === undefined && responseData?.agentInvoked === false) {
+        const commandOutput = Array.isArray(responseData.commandOutput)
+          ? responseData.commandOutput.filter((value): value is string => typeof value === "string")
+          : [];
+        for (const text of commandOutput) {
+          if (!text.trim()) continue;
+          context.messageSequence += 1;
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: input.threadId,
+              turnId,
+              itemId: `pi-msg-${context.messageSequence}`,
+            })),
+            type: "item.completed",
+            payload: {
+              itemType: "assistant_message",
+              status: "completed",
+              title: "Command output",
+              detail: text.trim(),
+            },
+          });
+        }
+        context.activeTurnId = undefined;
+        yield* updateProviderSession(context, { status: "ready" }, { clearActiveTurnId: true });
+        yield* emit({
+          ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+          type: "turn.completed",
+          payload: { state: "completed" },
+        });
+      }
 
       return { threadId: input.threadId, turnId };
     });

@@ -3,11 +3,14 @@ import {
   type ModelCapabilities,
   type PiSettings,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 
 import { createModelCapabilities, titleCaseSlug } from "@t3tools/shared/model";
 import {
@@ -16,6 +19,7 @@ import {
   PiRuntime,
   PiRuntimeError,
   piRuntimeErrorDetail,
+  type PiAvailableCommand,
   type PiAvailableModel,
 } from "../piRuntime.ts";
 import {
@@ -91,6 +95,26 @@ function toServerProviderModels(
   return out.toSorted((left, right) => left.slug.localeCompare(right.slug));
 }
 
+function toServerProviderSlashCommands(
+  commands: ReadonlyArray<PiAvailableCommand>,
+): Array<ServerProviderSlashCommand> {
+  const seen = new Set<string>();
+  const out: Array<ServerProviderSlashCommand> = [];
+  for (const command of commands) {
+    const name = command.name.trim().replace(/^\/+/, "");
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const description = command.description?.trim();
+    const hint = command.input?.hint?.trim();
+    out.push({
+      name,
+      ...(description ? { description } : {}),
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return out.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
 function formatPiProbeError(detail: string): { installed: boolean; message: string } {
   const lower = detail.toLowerCase();
   if (lower.includes("enoent") || lower.includes("notfound") || lower.includes("not found")) {
@@ -110,6 +134,7 @@ const piSnapshot = (input: {
   readonly checkedAt: string;
   readonly probe: ProviderProbeResult;
   readonly models?: ReadonlyArray<ServerProviderModel>;
+  readonly slashCommands?: ReadonlyArray<ServerProviderSlashCommand>;
 }): ServerProviderDraft =>
   buildServerProvider({
     presentation: PI_PRESENTATION,
@@ -118,6 +143,7 @@ const piSnapshot = (input: {
     models:
       input.models ??
       providerModelsFromSettings([], input.piSettings.customModels, DEFAULT_PI_MODEL_CAPABILITIES),
+    slashCommands: input.slashCommands ?? [],
     probe: input.probe,
   });
 
@@ -212,6 +238,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
           { type: "get_available_models" },
           { timeoutMs: PI_MODEL_DISCOVERY_TIMEOUT_MS },
         );
+        const commandsEvent = Option.getOrUndefined(yield* Queue.poll(rpc.events));
         const modelsDataExit = decodePiAvailableModelsResponseDataExit(response.data);
         if (Exit.isFailure(modelsDataExit)) {
           return yield* new PiRuntimeError({
@@ -219,7 +246,11 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
             detail: "Pi returned malformed available models data.",
           });
         }
-        return modelsDataExit.value.models;
+        return {
+          models: modelsDataExit.value.models,
+          commands:
+            commandsEvent?.type === "available_commands_update" ? commandsEvent.commands : [],
+        };
       }),
     ),
   );
@@ -229,7 +260,8 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     return fallback(detail, version);
   }
 
-  const piModels = modelsExit.value;
+  const piModels = modelsExit.value.models;
+  const slashCommands = toServerProviderSlashCommands(modelsExit.value.commands);
   const discoveredModels = toServerProviderModels(piModels);
   const models = providerModelsFromSettings(
     discoveredModels,
@@ -241,6 +273,7 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     piSettings,
     checkedAt,
     models,
+    slashCommands,
     probe: {
       installed: true,
       version,

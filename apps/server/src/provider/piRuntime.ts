@@ -293,6 +293,27 @@ const SubagentProgressEvent = Schema.Struct({
   }),
 });
 
+const AvailableCommandInput = Schema.Struct({
+  hint: Schema.optionalKey(Schema.String),
+});
+
+export const PiAvailableCommand = Schema.Struct({
+  name: Schema.String,
+  description: Schema.optionalKey(Schema.String),
+  input: Schema.optionalKey(AvailableCommandInput),
+});
+export type PiAvailableCommand = typeof PiAvailableCommand.Type;
+
+const AvailableCommandsUpdateEvent = Schema.Struct({
+  type: Schema.Literal("available_commands_update"),
+  commands: Schema.Array(PiAvailableCommand),
+});
+
+const CommandOutputEvent = Schema.Struct({
+  type: Schema.Literal("command_output"),
+  text: Schema.String,
+});
+
 const AgentEndEvent = Schema.Struct({
   type: Schema.Literal("agent_end"),
 });
@@ -305,6 +326,11 @@ const ExtensionUiRequestEvent = Schema.Struct({
   message: Schema.optionalKey(Schema.String),
   title: Schema.optionalKey(Schema.String),
   options: Schema.optionalKey(Schema.Array(Schema.String)),
+  widgetKey: Schema.optionalKey(Schema.String),
+  widgetLines: Schema.optionalKey(Schema.Array(Schema.String)),
+  statusKey: Schema.optionalKey(Schema.String),
+  statusText: Schema.optionalKey(Schema.String),
+  placement: Schema.optionalKey(Schema.Unknown),
 });
 
 const CompactionStartEvent = Schema.Struct({
@@ -333,6 +359,8 @@ export const PiRpcEvent = Schema.Union([
   ToolExecutionEvent,
   SubagentLifecycleEvent,
   SubagentProgressEvent,
+  AvailableCommandsUpdateEvent,
+  CommandOutputEvent,
   AgentEndEvent,
   ExtensionUiRequestEvent,
   CompactionStartEvent,

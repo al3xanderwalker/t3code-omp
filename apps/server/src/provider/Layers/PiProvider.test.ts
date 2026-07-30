@@ -49,6 +49,11 @@ const runtimeMock = {
         },
       ],
     } as unknown,
+    commands: [] as Array<{
+      name: string;
+      description?: string;
+      input?: { hint?: string };
+    }>,
     versionError: null as PiRuntimeError | null,
     modelsError: null as PiRuntimeError | null,
   },
@@ -58,6 +63,7 @@ const runtimeMock = {
     this.state.requests.length = 0;
     this.state.closeCalls = 0;
     this.state.versionResult = { stdout: "pi 0.4.1\n", stderr: "", code: 0 };
+    this.state.commands = [];
     this.state.modelsData = {
       models: [
         {
@@ -95,6 +101,10 @@ const PiRuntimeTestDouble: PiRuntimeShape = {
         }),
       );
       const events = yield* Queue.unbounded<PiRpcEvent>();
+      yield* Queue.offer(events, {
+        type: "available_commands_update",
+        commands: runtimeMock.state.commands,
+      });
       const handle: PiRpcHandle = {
         request: (command) =>
           Effect.gen(function* () {
@@ -258,6 +268,11 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
 
   it.effect("discovers models from RPC and exposes mapped thinking capabilities", () =>
     Effect.gen(function* () {
+      runtimeMock.state.commands = [
+        { name: "btw", description: "Ask a side question", input: { hint: "<question>" } },
+        { name: "/goal", description: "Manage a persistent goal" },
+        { name: "btw", description: "duplicate" },
+      ];
       const snapshot = yield* checkPiProviderStatus(decodePiSettings({ binaryPath: "pi" }));
       const slugs = snapshot.models.map((model) => model.slug);
 
@@ -270,6 +285,10 @@ it.layer(PiProviderTestLayer)("checkPiProviderStatus", (it) => {
         "anthropic/claude-haiku-4-5",
         "anthropic/claude-sonnet-5",
         "openai-codex/gpt-5-codex",
+      ]);
+      NodeAssert.deepEqual(snapshot.slashCommands, [
+        { name: "btw", description: "Ask a side question", input: { hint: "<question>" } },
+        { name: "goal", description: "Manage a persistent goal" },
       ]);
       NodeAssert.equal(runtimeMock.state.closeCalls, 1);
 

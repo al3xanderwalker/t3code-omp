@@ -66,6 +66,7 @@ const runtimeMock = {
     spawnFailures: [] as Array<PiRuntimeError | null | undefined>,
     stderrByHandle: [] as Array<string | undefined>,
     promptError: null as PiRuntimeError | null,
+    promptData: undefined as unknown,
     stateData: { sessionId: "pi-session-1" } as unknown,
     stateDataByHandle: [] as Array<unknown>,
     statsData: {
@@ -93,6 +94,7 @@ const runtimeMock = {
     this.state.spawnFailures.length = 0;
     this.state.stderrByHandle.length = 0;
     this.state.promptError = null;
+    this.state.promptData = undefined;
     this.state.stateData = { sessionId: "pi-session-1" };
     this.state.stateDataByHandle.length = 0;
     this.state.statsData = {
@@ -174,6 +176,14 @@ const PiRuntimeTestDouble: PiRuntimeShape = {
                 command: type,
                 success: true,
                 data: runtimeMock.state.messagesData,
+              };
+            }
+            if (type === "prompt") {
+              return {
+                type: "response",
+                command: type,
+                success: true,
+                data: runtimeMock.state.promptData,
               };
             }
             return { type: "response", command: type, success: true };
@@ -490,6 +500,38 @@ it.layer(PiAdapterTestLayer)("PiAdapterLive", (it) => {
         message: "Update that request",
         streamingBehavior: "steer",
       });
+    }),
+  );
+
+  it.effect("renders local command output before completing the turn", () =>
+    Effect.gen(function* () {
+      const adapter = yield* PiAdapter;
+      const threadId = asThreadId("thread-pi-local-command");
+      const eventsFiber = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.threadId === threadId),
+        Stream.take(5),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      runtimeMock.state.promptData = {
+        agentInvoked: false,
+        commandOutput: ["Goal mode paused."],
+      };
+
+      yield* startPiSession(adapter, threadId);
+      yield* adapter.sendTurn({ threadId, input: "/goal pause" });
+
+      const events = Array.from(yield* Fiber.join(eventsFiber));
+      NodeAssert.deepEqual(
+        events.map((event) => event.type),
+        ["session.started", "thread.started", "turn.started", "item.completed", "turn.completed"],
+      );
+      const outputEvent = events[3];
+      if (outputEvent?.type !== "item.completed") throw new Error("missing command output item");
+      NodeAssert.equal(outputEvent.payload.detail, "Goal mode paused.");
+      const session = (yield* adapter.listSessions()).find((entry) => entry.threadId === threadId);
+      NodeAssert.equal(session?.status, "ready");
+      NodeAssert.equal(session?.activeTurnId, undefined);
     }),
   );
 
